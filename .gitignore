@@ -1,3 +1,21 @@
+# Зависимости
+node_modules/
+.pnpm-store/
+pnpm-lock.yaml  # ← временно закомментируй, если хочешь закоммитить lockfile позже
+
+# Сборка
+dist/
+.vite/
+
+# Кэш и временные файлы
+.cache/
+*.log
+.DS_Store
+Thumbs.db
+
+# Локальные env
 .env
 .env.local
-.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
