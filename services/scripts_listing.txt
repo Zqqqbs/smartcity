@@ -1,0 +1,236 @@
+Директория: C:\tyumen-smart-city (14)\services
+================================================================================
+
+Файл: aiData.ts
+Путь: C:\tyumen-smart-city (14)\services
+--------------------------------------------------
+
+
+export const CITY_DATABASE = {
+    projects: {
+        "1": {
+            id: "1",
+            title: "SmartTraffic AI",
+            category: "Транспорт",
+            status: "MVP / Тестирование",
+            desc: "Система адаптивного управления светофорами на базе компьютерного зрения. Мы снижаем время ожидания на перекрестках на 25%. Сейчас ищем разработчиков для дообучения нейросети на зимних данных.",
+            image: "https:
+            team: "RoadMasters"
+        },
+        "2": {
+            id: "2",
+            title: "EcoMonitor 72",
+            category: "Экология",
+            status: "В разработке",
+            desc: "Сеть автономных датчиков качества воздуха. Мы собираем данные о частицах PM2.5 и CO2, визуализируя их на интерактивной карте города Тюмени.",
+            image: "https:
+            team: "AirGeeks"
+        }
+    },
+    teams: {
+        "1": {
+            id: "1",
+            name: "RoadMasters",
+            category: "Команда",
+            culture: "Стек: Python, React. Мы базируемся в Тюменском Технопарке. Готовы обучать стажеров, если есть база в алгоритмах. По пятницам — пицца и разбор кода.",
+            leader: "Дмитрий Волков",
+            image: "https:
+        },
+        "2": {
+            id: "2",
+            name: "AirGeeks",
+            category: "Команда",
+            culture: "Полностью удаленная команда. Свободный график, работаем по задачам в Jira. Ценим чистоту кода и самостоятельность.",
+            leader: "Анна Смирнова",
+            image: "https:
+        }
+    }
+};
+
+export const getCityContext = () => {
+    return `
+    АКТУАЛЬНЫЕ ДАННЫЕ ГОРОДА:
+    - Проект ID 1: SmartTraffic AI (Транспорт). Команда RoadMasters.
+    - Проект ID 2: EcoMonitor 72 (Экология). Команда AirGeeks.
+    - Команда ID 1: RoadMasters (Лидер: Дмитрий Волков). Ищут: Python, React. Готовы учить.
+    - Команда ID 2: AirGeeks (Лидер: Анна Смирнова). Ищут: Node.js, Дизайн. Удаленка.
+    
+    ИНСТРУКЦИЯ ПО ССЫЛКАМ:
+    Если ты упоминаешь проект, ПИШИ СТРОГО В ФОРМАТЕ [[проект:ID]].
+    Если команду, ПИШИ СТРОГО [[команда:ID]].
+    Например: "Тебе подойдет [[команда:1]]".
+    `;
+};
+================================================================================
+
+Файл: api.ts
+Путь: C:\tyumen-smart-city (14)\services
+--------------------------------------------------
+import * as CONSTANTS from '../constants';
+import { NewsArticle, ProjectData, StudentStory, CampusTeam, CampusEvent, Member, Resource } from '../types';
+
+const networkDelay = () => new Promise(res => setTimeout(res, 300));
+
+
+const db = {
+  get: (key: string, defaultValue: any) => {
+    try {
+      const data = localStorage.getItem(key);
+      return data ? JSON.parse(data) : defaultValue;
+    } catch (e) {
+      return defaultValue;
+    }
+  }
+};
+
+export const ApiService = {
+  
+  async getNews(): Promise<NewsArticle[]> {
+    try {
+      
+      const baseUrl = import.meta.env.BASE_URL || '/';
+      const cleanPath = (path: string) => (baseUrl + path).replace(/\/+/g, '/');
+
+      console.log('Загрузка новостей из:', cleanPath('news_data.json'));
+
+      
+      const [cityRes, itRes] = await Promise.all([
+        fetch(cleanPath('news_data.json')).then(res => res.ok ? res.json() : []),
+        fetch(cleanPath('it_news_data.json')).then(res => res.ok ? res.json() : [])
+      ]);
+
+      const combinedNews = [...cityRes, ...itRes];
+
+      if (combinedNews.length > 0) {
+        
+        return combinedNews.map((item: any) => ({
+            ...item,
+            imageUrl: item.imageUrl && item.imageUrl.startsWith('/') 
+                ? cleanPath(item.imageUrl.substring(1)) 
+                : item.imageUrl || "https://images.unsplash.com/photo-1498050108023-c5249f4df085?q=80&w=800"
+        }));
+      }
+
+      
+      return CONSTANTS.NEWS_ARTICLES;
+    } catch (error) {
+      console.error("Ошибка при чтении JSON новостей:", error);
+      return CONSTANTS.NEWS_ARTICLES;
+    }
+  },
+
+  async getProjects(): Promise<ProjectData[]> {
+    await networkDelay();
+    return db.get('projects_full', CONSTANTS.PROJECTS_LIST);
+  },
+
+  
+  async getServices() {
+    await networkDelay();
+    return (CONSTANTS as any).SERVICES_LIST || [];
+  },
+
+  async getCampusData() {
+    await networkDelay();
+    return {
+      stories: db.get('student_stories', CONSTANTS.STUDENT_STORIES) as StudentStory[],
+      teams: db.get('campus_teams', CONSTANTS.CAMPUS_TEAMS) as CampusTeam[],
+      events: db.get('campus_events', CONSTANTS.CAMPUS_EVENTS) as CampusEvent[],
+      resources: db.get('campus_resources', CONSTANTS.STUDENT_RESOURCES) as Resource[]
+    };
+  },
+
+  async getManagementStructure() {
+    await networkDelay();
+    return {
+      council: db.get('council_members', CONSTANTS.COUNCIL_MEMBERS) as Member[],
+      committee: db.get('committee_members', CONSTANTS.COMMITTEE_MEMBERS) as Member[],
+      monitoring: db.get('monitoring_members', CONSTANTS.MONITORING_MEMBERS) as Member[]
+    };
+  },
+
+  async getUserProfile() {
+    await networkDelay();
+    return db.get('user_profile', CONSTANTS.USER_PROFILE);
+  }
+};
+================================================================================
+
+Файл: gemini.ts
+Путь: C:\tyumen-smart-city (14)\services
+--------------------------------------------------
+
+import { GoogleGenAI, Type } from "@google/genai";
+
+// Initialize the GoogleGenAI client with the API key from process.env.API_KEY.
+const getAI = () => {
+  if (!process.env.API_KEY) return null;
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+};
+
+const SYSTEM_INSTRUCTION = `Ты — бэкенд-модуль системы "Умный город Тюмень". Анализируй данные и давай экспертную оценку. Тон: официальный, конструктивный.`;
+
+/**
+ * Uses Gemini 3 Pro to analyze urban initiatives.
+ */
+export const analyzeInitiative = async (title: string, description: string) => {
+  const ai = getAI();
+  if (!ai) throw new Error("API KEY MISSING");
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-preview",
+    contents: `Проанализируй: ${title}. Описание: ${description}`,
+    config: {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          score: { type: Type.NUMBER },
+          difficulty: { type: Type.STRING },
+          feedback: { type: Type.STRING },
+          budgetEstimate: { type: Type.STRING },
+          category: { type: Type.STRING }
+        },
+        required: ["score", "difficulty", "feedback", "budgetEstimate", "category"]
+      }
+    }
+  });
+
+  // Directly access the .text property from the GenerateContentResponse object.
+  return JSON.parse(response.text || "{}");
+};
+
+/**
+ * Searches for city news using Google Search grounding.
+ */
+export const searchCityNews = async (query: string) => {
+  const ai = getAI();
+  if (!ai) return { text: "No API Key", sources: [] };
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Новости Тюмени: ${query}`,
+    config: { tools: [{ googleSearch: {} }] }
+  });
+  
+  return {
+    // Directly access the .text property from the GenerateContentResponse object.
+    text: response.text,
+    sources: response.candidates?.[0]?.groundingMetadata?.groundingChunks || []
+  };
+};
+
+================================================================================
+
+Файл: supabase.ts
+Путь: C:\tyumen-smart-city (14)\services
+--------------------------------------------------
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = 'https://mxwissvbcckdoaxyvjgs.supabase.co'
+const supabaseKey = 'sb_publishable_-DAgHnTj3lbwLth0lM8G0g_j10Ok5ZO';
+
+export const supabase = createClient(supabaseUrl, supabaseKey);
+================================================================================
+

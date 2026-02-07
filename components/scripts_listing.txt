@@ -1,0 +1,2519 @@
+Директория: C:\tyumen-smart-city (14)\components
+================================================================================
+
+Файл: AIChat.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React, { useState, useRef, useEffect } from 'react';
+import { supabase } from '../services/supabase';
+import { InfoModal } from './InfoModal';
+
+interface Message {
+    role: 'user' | 'ai';
+    text: string;
+}
+
+export const AIChat: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
+    const [messages, setMessages] = useState<Message[]>([
+        { role: 'ai', text: 'Привет! Я ИИ-консультант Тюмени. Чем могу помочь? (ЖКХ, транспорт, медицина или ИТ-инициативы)' }
+    ]);
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [selectedItem, setSelectedItem] = useState<any>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }, [messages, loading]);
+
+    // --- НОВЫЙ ПАРСЕР (ЧИТАЕТ НАЗВАНИЯ) ---
+    const parseMessage = (text: string) => {
+        const cleanText = text.replace(/\*\*?/g, '');
+        // Ищем формат [[тип:ID|Название]]
+        // Пример: [[сервис:2|Транспортная карта]]
+        const parts = cleanText.split(/(\[\[(?:проект|сервис):\d+\|.+?\]\])/g);
+        
+        return parts.map((part, i) => {
+            if (part.startsWith('[[') && part.includes('|')) {
+                // Убираем скобки
+                const content = part.slice(2, -2); // "сервис:2|Транспортная карта"
+                const [meta, label] = content.split('|'); // meta="сервис:2", label="Транспортная карта"
+                const [type, id] = meta.split(':'); // type="сервис", id="2"
+                
+                const isProject = type === 'проект';
+
+                return (
+                    <button 
+                        key={i}
+                        onClick={async () => {
+                            console.log(`Загрузка: ${type} ID=${id}`);
+                            const table = isProject ? 'projects' : 'services';
+                            
+                            const { data, error } = await supabase
+                                .from(table)
+                                .select('*')
+                                .eq('id', id)
+                                .single();
+
+                            if (error || !data) {
+                                alert("Ошибка: карточка не найдена в базе (возможно, удалена).");
+                                return;
+                            }
+
+                            // СТРОГОЕ ОПРЕДЕЛЕНИЕ ТИПА ДЛЯ МОДАЛКИ
+                            setSelectedItem({
+                                title: data.title,
+                                desc: data.description,
+                                category: data.category,
+                                image: data.image_url,
+                                isService: !isProject, // true для сервисов
+                                // Для сервисов берем текст из базы или "Перейти", для проектов "Подать заявку"
+                                buttonText: isProject ? 'Подать заявку' : (data.button_text || 'Перейти к сервису'),
+                                status: isProject ? data.status : undefined
+                            });
+                        }}
+                        className={`mx-1 px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all inline-flex items-center gap-2 shadow-sm border whitespace-nowrap my-1 ${
+                            isProject 
+                            ? 'bg-yellow-400/10 text-yellow-400 border-yellow-400/30 hover:bg-yellow-400 hover:text-black' 
+                            : 'bg-sky-400/10 text-sky-300 border-sky-400/30 hover:bg-sky-500 hover:text-white'
+                        }`}
+                    >
+                        {isProject ? '🚀' : '🏛'} {label} 
+                        <span className="opacity-50 text-[10px]">↗</span>
+                    </button>
+                );
+            }
+            return part;
+        });
+    };
+
+    const handleSend = async () => {
+        if (!input.trim() || loading) return;
+
+        const userMsg = input;
+        setInput('');
+        setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+        setLoading(true);
+
+        try {
+            // 1. Запрос данных
+            const [projectsRes, servicesRes] = await Promise.all([
+                supabase.from('projects').select('id, title, category, description'),
+                supabase.from('services').select('id, title, category, description')
+            ]);
+
+            // 2. Формируем контекст (Добавляем ID и Название для подсказки боту)
+            const servicesList = servicesRes.data?.map(s => 
+                `ID:${s.id} | НАЗВАНИЕ: "${s.title}" | СУТЬ: ${s.description}`
+            ).join('\n') || "";
+
+            const projectsList = projectsRes.data?.map(p => 
+                `ID:${p.id} | НАЗВАНИЕ: "${p.title}" | СУТЬ: ${p.description}`
+            ).join('\n') || "";
+
+            const fullCityContext = `
+                === СПИСОК ГОРОДСКИХ СЕРВИСОВ (ДЛЯ ЖИТЕЛЕЙ) ===
+                ${servicesList}
+
+                === СПИСОК ИТ-ПРОЕКТОВ (ДЛЯ РАЗРАБОТЧИКОВ/ИННОВАТОРОВ) ===
+                ${projectsList}
+            `;
+
+            // 3. Запрос к ИИ
+            const response = await fetch('https://api.deepseek.com/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer sk-c417fbd2258048288838283451e4ca7e` 
+                },
+                body: JSON.stringify({
+                    model: "deepseek-chat",
+                    messages: [
+                        { 
+                            role: "system", 
+                            content: `Ты — ИИ-консультант "Умный город Тюмень".
+                            
+                            ТВОЯ БАЗА ЗНАНИЙ:
+                            ${fullCityContext}
+                            
+                            СТРОГИЕ ПРАВИЛА (НЕ НАРУШАТЬ):
+                            1. ССЫЛКИ: Всегда используй формат: [[тип:ID|Название]].
+                               Пример: [[сервис:5|Городской Wi-Fi]] или [[проект:12|Умный светофор]].
+                            
+                            2. РЕЛЕВАНТНОСТЬ:
+                               - Если пользователь спрашивает про ЖКХ, больницы, школы, транспорт -> ПРЕДЛАГАЙ ТОЛЬКО СЕРВИСЫ. Не смей предлагать проекты! Проекты тут не помогут, человеку нужно решение проблемы.
+                               - Если пользователь говорит "хочу команду", "я программист", "есть идея" -> ПРЕДЛАГАЙ ПРОЕКТЫ.
+                            
+                            3. ТОЧНОСТЬ:
+                               - Бери ID и Название СТРОГО из базы знаний выше. Не выдумывай ID.
+                            
+                            4. СТИЛЬ:
+                               - Отвечай кратко и по делу. Без воды.` 
+                        },
+                        { role: "user", content: userMsg }
+                    ],
+                    temperature: 0.3 // Низкая температура, чтобы не галлюцинировал
+                })
+            });
+
+            if (!response.ok) throw new Error("API Error");
+            const data = await response.json();
+            setMessages(prev => [...prev, { role: 'ai', text: data.choices[0].message.content }]);
+
+        } catch (e) {
+            console.error(e);
+            setMessages(prev => [...prev, { role: 'ai', text: 'Ошибка соединения с сервером.' }]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <>
+            <div className="fixed bottom-10 right-10 z-[200] flex flex-col bg-[#122e41] border border-white/10 rounded-[30px] shadow-2xl animate-in slide-in-from-bottom-5 duration-500 overflow-hidden"
+                style={{ width: '400px', height: '600px', maxWidth: '90vw', resize: 'both' }}>
+                
+                {/* Header */}
+                <div className="flex-none p-5 border-b border-white/10 flex justify-between items-center bg-[#0b2234]">
+                    <div className="flex items-center space-x-3">
+                        <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                        <span className="font-bold text-xs uppercase tracking-widest text-white">Тюмень.Ассистент</span>
+                    </div>
+                    <button onClick={onClose} className="text-white/50 hover:text-white text-2xl">&times;</button>
+                </div>
+
+                {/* Chat Area */}
+                <div ref={scrollRef} className="flex-grow p-6 overflow-y-auto space-y-6 bg-[#0f2536] custom-scrollbar">
+                    {messages.map((m, i) => (
+                        <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[90%] p-4 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap shadow-md ${
+                                m.role === 'user' ? 'bg-yellow-500 text-black font-medium' : 'bg-[#1a3a4d] text-white'
+                            }`}>
+                                {m.role === 'ai' ? parseMessage(m.text) : m.text}
+                            </div>
+                        </div>
+                    ))}
+                    {loading && <div className="text-xs text-white/30 text-center animate-pulse">Поиск информации...</div>}
+                </div>
+
+                {/* Input */}
+                <div className="p-4 bg-[#0b2234] border-t border-white/5">
+                    <div className="flex gap-2">
+                        <input 
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                            placeholder="Например: как записать ребенка в школу?"
+                            className="flex-grow bg-[#122e41] px-4 py-3 rounded-xl text-sm text-white outline-none focus:ring-1 focus:ring-yellow-400/50 transition-all"
+                        />
+                        <button onClick={handleSend} disabled={loading} className="bg-yellow-500 text-black p-3 rounded-xl hover:bg-yellow-400 transition-colors">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {selectedItem && (
+                <InfoModal 
+                    data={selectedItem}
+                    onClose={() => setSelectedItem(null)} 
+                />
+            )}
+        </>
+    );
+};
+================================================================================
+
+Файл: CampusPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { ApiService } from '../services/api';
+
+export const CampusPage: React.FC = () => {
+    const [data, setData] = useState<any>(null);
+
+    useEffect(() => {
+        ApiService.getCampusData().then(setData);
+    }, []);
+
+    if (!data) return <div className="p-20 text-center animate-pulse text-gray-500 uppercase font-black">Загрузка кампуса...</div>;
+
+    return (
+        <div className="animate-in fade-in duration-700 pb-20">
+            {/* News Row */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-20 mt-12">
+                <div className="relative h-[300px] rounded-[32px] overflow-hidden group">
+                    <img src="https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?q=80&w=800" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" alt="" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent p-8 flex flex-col justify-end">
+                        <h3 className="text-white font-bold text-xl mb-2">Команда ТИУ победила в международном хакатоне Smart Cities</h3>
+                        <p className="text-gray-400 text-xs">Студенты разработали революционную систему управления городским освещением...</p>
+                    </div>
+                </div>
+                <div className="relative h-[300px] rounded-[32px] overflow-hidden group">
+                    <img src="https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?q=80&w=800" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" alt="" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent p-8 flex flex-col justify-end">
+                        <h3 className="text-white font-bold text-xl mb-2">Запуск нового проекта: Цифровизация общественного транспорта</h3>
+                        <p className="text-gray-400 text-xs">Администрация города и ТИУ подписали соглашение о совместной разработке системы...</p>
+                    </div>
+                </div>
+            </div>
+
+            {/* Testing & Ads Section */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-20">
+                <div className="bg-[#122e41] p-8 rounded-[32px] border border-white/5">
+                    <h3 className="text-xl font-bold mb-6">Тестирование</h3>
+                    <div className="space-y-6 mb-8">
+                        <div className="flex gap-4">
+                            <div className="w-10 h-10 rounded-lg bg-yellow-400/10 flex items-center justify-center text-yellow-400">📊</div>
+                            <div>
+                                <h4 className="text-sm font-bold">Суть тестирования</h4>
+                                <p className="text-xs text-gray-500 leading-snug">Оценка технических навыков, soft skills и соответствия требованиям проектов Smart City</p>
+                            </div>
+                        </div>
+                    </div>
+                    <button className="w-full bg-yellow-400 text-black py-3 rounded-xl font-black text-sm uppercase">Пройти тестирование</button>
+                </div>
+                
+                <div className="md:col-span-2 space-y-6">
+                    <h3 className="text-xl font-bold">Объявления</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {[
+                            { type: "Учебное", title: "Открыта регистрация на защиту коллективных ВКР", date: "до 5 декабря 2025" },
+                            { type: "Административное", title: "График работы лабораторий в зимний период", date: "с 25 декабря по 10 января" },
+                            { type: "Срочное", title: "Изменение сроков сдачи промежуточных отчетов", date: "до 20 декабря 2025" },
+                            { type: "Учебное", title: "Семинар по работе с Git и CI/CD", date: "5 декабря в 15:00" }
+                        ].map((ad, i) => (
+                            <div key={i} className="bg-[#122e41]/40 p-6 rounded-2xl border border-white/5 hover:border-white/20 transition-all cursor-pointer">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-yellow-500 mb-2 inline-block">{ad.type}</span>
+                                <h4 className="text-white font-bold text-sm mb-2">{ad.title}</h4>
+                                <p className="text-gray-500 text-[10px] font-bold">{ad.date}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            {/* Stories */}
+            <h2 className="text-3xl font-bold text-white mb-10">Истории студентов</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-20">
+                {data.stories.map((s: any) => (
+                    <div key={s.id} className="bg-[#122e41] rounded-[32px] overflow-hidden border border-white/5 flex flex-col h-full">
+                        <div className="aspect-[4/3] bg-gray-300">
+                            <img src={s.imageUrl} className="w-full h-full object-cover grayscale hover:grayscale-0 transition-all duration-500" alt={s.name} />
+                        </div>
+                        <div className="p-8">
+                            <h4 className="text-lg font-bold mb-1">{s.name}</h4>
+                            <p className="text-yellow-400 text-[10px] font-bold uppercase tracking-widest mb-4">{s.role}</p>
+                            <p className="text-gray-400 text-sm italic mb-6 leading-relaxed">{s.text}</p>
+                            <div className="space-y-2">
+                                {s.awards.map((a: string) => (
+                                    <div key={a} className="flex items-center text-[10px] font-bold text-white/70 uppercase tracking-widest">
+                                        <span className="text-yellow-400 mr-2">★</span> {a}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Opportunities (Business, Initiatives, etc) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-20">
+                {[
+                    { title: "Заказы бизнеса", icon: "💼", btn: "Подать заявку" },
+                    { title: "Инициативы", icon: "💡", btn: "Подать заявку" },
+                    { title: "Продолжение", icon: "📈", btn: "Подать заявку" }
+                ].map((op, i) => (
+                    <div key={i} className="bg-[#122e41] p-10 rounded-[40px] border border-white/5 text-center flex flex-col items-center group">
+                        <div className="text-4xl mb-6 transform group-hover:scale-110 transition-transform">{op.icon}</div>
+                        <h3 className="text-2xl font-bold mb-4">{op.title}</h3>
+                        <p className="text-gray-500 text-xs mb-8">Описание возможностей для студентов и молодых специалистов по работе в проектах</p>
+                        <button className="bg-white/5 hover:bg-white/10 text-white px-8 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all">
+                            {op.btn}
+                        </button>
+                    </div>
+                ))}
+            </div>
+
+            {/* Teams Section */}
+            <h2 className="text-3xl font-bold text-white mb-10">Существующие команды</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-20">
+                {data.teams.map((t: any) => (
+                    <div key={t.id} className="bg-[#122e41] p-10 rounded-[40px] border border-white/5 relative overflow-hidden">
+                        <div className="flex justify-between items-start mb-6">
+                            <h4 className="text-2xl font-bold">{t.title}</h4>
+                            <span className="flex items-center text-yellow-400 text-sm font-bold">👤 {t.members}</span>
+                        </div>
+                        <p className="text-gray-400 text-sm mb-8 leading-relaxed">{t.desc}</p>
+                        <div className="flex flex-wrap gap-2 mb-10">
+                            {t.tags.map((tag: string) => (
+                                <span key={tag} className="bg-black/30 text-gray-400 px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest border border-white/5">{tag}</span>
+                            ))}
+                        </div>
+                        <div className="flex justify-between items-center border-t border-white/5 pt-8">
+                            <div className="text-[10px] uppercase font-bold tracking-widest text-gray-500">
+                                Ищем: <span className="text-white">{t.stack}</span>
+                            </div>
+                            <button className="bg-yellow-400 text-black px-6 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-yellow-500 transition-all">Присоединиться</button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Events Calendar */}
+            <h2 className="text-3xl font-bold text-white mb-10">Календарь событий</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-20">
+                {data.events.map((e: any) => (
+                    <div key={e.id} className={`${e.bgColor} p-8 rounded-[32px] border border-white/5 flex flex-col justify-between group cursor-pointer hover:border-yellow-400/50 transition-all`}>
+                        <div>
+                            <span className="text-[10px] font-black uppercase tracking-widest text-white/50 mb-4 inline-block">{e.type}</span>
+                            <h4 className="text-xl font-bold mb-6 group-hover:text-yellow-400 transition-colors">{e.title}</h4>
+                            <div className="space-y-2 text-xs text-white/70">
+                                <div className="flex items-center">📅 {e.date}</div>
+                                {e.time && <div className="flex items-center">🕒 {e.time}</div>}
+                                <div className="flex items-center">📍 {e.location}</div>
+                            </div>
+                        </div>
+                        <button className="w-full bg-white/10 hover:bg-yellow-400 hover:text-black mt-8 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all">
+                            {e.buttonText}
+                        </button>
+                    </div>
+                ))}
+            </div>
+
+            {/* Visual Timeline Section */}
+            <div className="bg-[#0b2234] rounded-[50px] p-16 mb-20 relative overflow-hidden border border-white/5">
+                <h2 className="text-4xl font-bold mb-20 text-center">Таймлайн</h2>
+                {/* stylized visual path simplified for rendering */}
+                <div className="relative border-l-4 border-yellow-400/30 ml-8 md:ml-20 space-y-24">
+                   {[
+                       { date: "25.01.2024", title: "Школа лидера", desc: "Старт весенней волны" },
+                       { date: "05.02.2024", title: "Встречи команд", desc: "Консультации с менторами" },
+                       { date: "12.02.2024", title: "MVP готов", desc: "Первая итерация проекта" }
+                   ].map((t, i) => (
+                       <div key={i} className="relative pl-12">
+                           <div className="absolute -left-[14px] top-0 w-6 h-6 rounded-full bg-yellow-400 border-4 border-[#0b2234]"></div>
+                           <span className="bg-yellow-400 text-black px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest mb-3 inline-block">{t.date}</span>
+                           <h4 className="text-2xl font-bold mb-1">{t.title}</h4>
+                           <p className="text-gray-500 font-bold">{t.desc}</p>
+                       </div>
+                   ))}
+                </div>
+            </div>
+
+            {/* Useful Resources */}
+            <h2 className="text-3xl font-bold text-white mb-10">Полезные ресурсы</h2>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-20">
+                {data.resources.map((r: any) => (
+                    <div key={r.id} className="bg-[#122e41] p-8 rounded-[32px] border border-white/5 hover:bg-[#1a3a4d] transition-all cursor-pointer flex flex-col items-center text-center">
+                        <div className="text-4xl mb-6">{r.icon}</div>
+                        <h4 className="text-sm font-bold mb-2 leading-tight h-10">{r.name}</h4>
+                        <div className="flex justify-between w-full mt-4 text-[10px] uppercase font-black tracking-widest text-gray-500">
+                            <span>{r.format}</span>
+                            <span>{r.size}</span>
+                        </div>
+                        <button className="mt-6 text-yellow-400 text-[10px] font-black uppercase tracking-widest hover:underline">Скачать ↓</button>
+                    </div>
+                ))}
+            </div>
+
+            {/* Campus Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                {[
+                    { val: "12", label: "Команд", icon: "🛡️" },
+                    { val: "450+", label: "Студентов", icon: "👤" },
+                    { val: "15", label: "Проектов", icon: "⚙️" },
+                    { val: "+45%", label: "Рост за год", icon: "📈" }
+                ].map((s, i) => (
+                    <div key={i} className="bg-[#122e41]/60 backdrop-blur-md p-8 rounded-[24px] border border-white/5 text-center flex flex-col items-center">
+                        <div className="text-3xl font-black text-white mb-1">{s.val}</div>
+                        <div className="text-[10px] text-gray-400 uppercase font-black tracking-widest">{s.label}</div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: DevelopmentDecisionBanner.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+
+export const DevelopmentDecisionBanner: React.FC = () => {
+  return (
+    <section className="py-12">
+      <div className="relative h-[300px] md:h-[350px] overflow-hidden rounded-none group cursor-pointer border border-white/5">
+        {/* Фоновое изображение (Тюмень - то же, что в Hero) */}
+        <img 
+          src="https://avatars.mds.yandex.net/i?id=4e8c83736a5e6b1cf8eee780859c9bba_l-4984230-images-thumbs&n=13" 
+          alt="Тюмень" 
+          className="absolute inset-0 w-full h-full object-cover transition-transform duration-1000 group-hover:scale-105"
+        />
+        {/* Затемнение для читаемости текста */}
+        <div className="absolute inset-0 bg-black/50 group-hover:bg-black/40 transition-colors"></div>
+        
+        <div className="absolute inset-0 p-8 md:p-16 flex flex-col md:flex-row justify-between items-start md:items-end">
+          <h2 className="text-white text-3xl md:text-5xl font-bold max-w-2xl leading-tight">
+            Кто решает, как развивается Тюмень?
+          </h2>
+          
+          <div className="mt-8 md:mt-0 flex items-center space-x-3 text-white group/btn">
+            <span className="text-lg font-bold border-b border-white/30 group-hover/btn:border-white transition-all">Перейти</span>
+            <svg className="w-6 h-6 transform group-hover/btn:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+================================================================================
+
+Файл: EventsSection.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+import { EVENTS, EVENT_CATEGORIES } from '../constants';
+import { EventItem } from '../types';
+import { FilterSidebar } from './FilterSidebar';
+
+const EventCard: React.FC<{ event: EventItem }> = ({ event }) => {
+  const colSpanClass = `lg:col-span-${event.colSpan || 1}`;
+  const rowSpanClass = `lg:row-span-${event.rowSpan || 1}`;
+
+  return (
+    <div className={`${event.bgColor} ${event.textColor} rounded-lg overflow-hidden relative flex flex-col p-6 ${colSpanClass} ${rowSpanClass} min-h-[250px]`}>
+      {event.imageUrl && (
+        <>
+            <img src={event.imageUrl} alt={event.title} className="absolute inset-0 w-full h-full object-cover" />
+            <div className="absolute inset-0 bg-black/50"></div>
+        </>
+      )}
+      <div className="relative z-10 flex flex-col h-full">
+        <h3 className={`text-xl font-bold ${event.imageUrl ? 'mt-auto' : ''}`}>{event.title}</h3>
+        {event.description && <p className="mt-2 text-sm">{event.description}</p>}
+      </div>
+    </div>
+  );
+};
+
+
+export const EventsSection: React.FC = () => {
+  return (
+    <section className="py-16 md:py-24">
+       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 auto-rows-fr">
+            {EVENTS.map(event => <EventCard key={event.id} event={event} />)}
+            <div className="md:col-span-2 lg:col-span-1">
+                 <FilterSidebar categories={EVENT_CATEGORIES} activeCategory="Конференции и саммиты" />
+            </div>
+        </div>
+    </section>
+  );
+};
+
+================================================================================
+
+Файл: FilterSidebar.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useState } from 'react';
+
+interface FilterSidebarProps {
+  categories: string[];
+  activeCategory: string;
+}
+
+export const FilterSidebar: React.FC<FilterSidebarProps> = ({ categories, activeCategory }) => {
+  const [current, setCurrent] = useState(activeCategory);
+
+  return (
+    <div className="bg-transparent h-full">
+      <ul className="space-y-4">
+        {categories.map((category) => (
+          <li key={category}>
+            <button
+              onClick={() => setCurrent(category)}
+              className={`text-left w-full text-base transition-colors font-medium ${
+                current === category
+                  ? 'text-sky-400 font-bold'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              {category}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+================================================================================
+
+Файл: Footer.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+import { FOOTER_LINKS } from '../constants';
+
+export const Footer: React.FC = () => {
+  return (
+    <footer className="bg-[#063553] pt-24 pb-12 text-white border-t border-white/5">
+      <div className="w-[81.25%] mx-auto">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-12 mb-20">
+          {Object.entries(FOOTER_LINKS).map(([title, links]) => (
+            <div key={title}>
+              <h4 className="font-bold text-gray-400 mb-6 uppercase text-xs tracking-widest">{title}</h4>
+              <ul className="space-y-4">
+                {links.map((link) => (
+                  <li key={link}>
+                    <a href="#" className="text-white/70 hover:text-yellow-400 text-sm transition-colors">
+                      {link}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+        <div className="border-t border-white/10 pt-10 flex flex-col md:flex-row justify-between items-center text-[10px] text-gray-500 uppercase tracking-widest font-bold">
+          <div className="flex flex-wrap items-center gap-x-8 gap-y-4 mb-8 md:mb-0">
+            <p>© Smart City Tyumen, 2025</p>
+            <a href="#" className="hover:text-white transition-colors">Политика конфиденциальности</a>
+            <a href="#" className="hover:text-white transition-colors">Сообщить о нарушениях: +7-111-111-11-11</a>
+            <a href="#" className="hover:text-white transition-colors">Написать нам</a>
+          </div>
+          <div className="flex items-center space-x-6 grayscale opacity-50">
+             <a href="#" className="hover:grayscale-0 transition-all"><img src="https://i.postimg.cc/KvRB03jT/icons8_vk_50.png" alt="VK" className="h-5 w-5 invert" /></a>
+             <a href="#" className="hover:grayscale-0 transition-all"><img src="https://i.postimg.cc/nLM1Hyzc/icons8-telegram-50.png" alt="TG" className="h-5 w-5 invert" /></a>
+          </div>
+        </div>
+      </div>
+    </footer>
+  );
+};
+
+================================================================================
+
+Файл: Header.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React from 'react';
+
+interface HeaderProps {
+  onNavigate: (page: string) => void;
+  onOpenChat: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({ onNavigate, onOpenChat }) => {
+  return (
+    <header className="py-6 flex justify-between items-center text-white">
+      {/* Левая часть: Логотип */}
+      <div 
+        className="flex items-center space-x-5 cursor-pointer group" 
+        onClick={() => onNavigate('home')}
+      >
+        <img 
+          src="https://i.postimg.cc/GtNNrpMg/3-26.png" 
+          alt="City Logo" 
+          className="h-12 w-12 object-contain transition-transform group-hover:scale-105" 
+        />
+        <div className="flex flex-col justify-center">
+          <span className="font-refined-serif text-xl leading-none font-medium">Город, где</span>
+          <span className="font-refined-serif text-xl leading-tight font-medium">технологии начинают путь</span>
+        </div>
+      </div>
+
+      {/* Правая часть: Инструменты */}
+      <div className="flex items-center space-x-6 text-sm">
+        <button className="flex items-center space-x-1 hover:text-yellow-400 transition-colors font-bold uppercase tracking-widest text-[12px]">
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/></svg>
+          <span>RU</span>
+        </button>
+
+        <button className="hover:text-yellow-400 transition-colors p-1 transform hover:scale-110 transition-transform">
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        </button>
+
+        {/* ИИ-Помощник */}
+        <button 
+          onClick={onOpenChat}
+          className="relative group p-2 bg-white/5 hover:bg-white/10 rounded-full transition-all border border-white/5 hover:border-yellow-400/50"
+        >
+          <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-yellow-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(250,204,21,0.6)]"></div>
+          <svg className="w-5 h-5 text-white/80 group-hover:text-yellow-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+          </svg>
+        </button>
+
+        {/* Иконка профиля */}
+        <button 
+          onClick={() => onNavigate('newPage')} 
+          className="hover:text-yellow-400 transition-colors p-1 transform hover:scale-110 transition-transform"
+        >
+          <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+  );
+};
+================================================================================
+
+Файл: Hero.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+
+const NavLink: React.FC<{ href: string; children: React.ReactNode; active?: boolean; onClick?: (e: React.MouseEvent<HTMLAnchorElement>) => void }> = ({ href, children, active, onClick }) => {
+  return (
+    <a
+      href={href}
+      onClick={onClick}
+      className={`text-base md:text-lg font-bold py-2 transition-colors hover:text-yellow-400 whitespace-nowrap ${
+        active ? 'text-yellow-400' : 'text-white'
+      }`}
+    >
+      {children}
+    </a>
+  );
+};
+
+interface HeroProps {
+    onNavigate: (page: string) => void;
+    currentPage: string;
+    backgroundImage?: string;
+}
+
+export const Hero: React.FC<HeroProps> = ({ onNavigate, currentPage, backgroundImage }) => {
+  const bgImage = backgroundImage || 'https://i.postimg.cc/gj7pRF8F/Frame-498.png';
+
+  return (
+    <div className="mb-0">
+      <section className="relative h-[80vh] overflow-hidden flex flex-col justify-end">
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-all duration-1000"
+          style={{ backgroundImage: `url('${bgImage}')` }}
+        >
+          {/* Градиент */}
+          <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-[#063553]/90"></div>
+        </div>
+        
+        <div className="relative z-10 px-0 pb-6 text-left md:text-right flex flex-col items-start md:items-end">
+           {/* Пустой контейнер для сохранения отступов, если необходимо */}
+        </div>
+      </section>
+
+      <nav className="bg-transparent pt-3 pb-0">
+        <div className="flex justify-between items-center w-full overflow-x-auto gap-8 no-scrollbar">
+          <NavLink href="#" active={currentPage === 'home'} onClick={(e) => { e.preventDefault(); onNavigate('home'); }}>Главная</NavLink>
+          <NavLink href="#" active={currentPage === 'management'} onClick={(e) => { e.preventDefault(); onNavigate('management'); }}>Умный город</NavLink>
+          <NavLink href="#" active={currentPage === 'services'} onClick={(e) => { e.preventDefault(); onNavigate('services'); }}>Сервисы</NavLink>
+          <NavLink href="#" active={currentPage === 'projects'} onClick={(e) => { e.preventDefault(); onNavigate('projects'); }}>Проекты</NavLink>
+          <NavLink href="#" active={currentPage === 'campus'} onClick={(e) => { e.preventDefault(); onNavigate('campus'); }}>Студентам</NavLink>
+        </div>
+      </nav>
+    </div>
+  );
+};
+
+================================================================================
+
+Файл: InfoModal.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React from 'react';
+
+interface InfoModalProps {
+    data: {
+        title: string;
+        desc: string;
+        category: string;
+        image: string;
+        // Поля для универсальности
+        status?: string;       // Только для проектов (например, "В работе")
+        buttonText?: string;   // Текст на кнопке
+        isService?: boolean;   // Флаг: true = сервис (синий), false = проект (желтый)
+        link?: string;         // Ссылка для перехода (на будущее)
+    };
+    onClose: () => void;
+}
+
+export const InfoModal: React.FC<InfoModalProps> = ({ data, onClose }) => {
+    // Если данных нет, ничего не рендерим
+    if (!data) return null;
+
+    const handleButtonClick = () => {
+        if (data.isService) {
+            // ЛОГИКА ДЛЯ СЕРВИСА:
+            // В реальном проекте здесь будет: window.open(data.link, '_blank');
+            alert(`Переходим на портал госуслуг или сайт сервиса: "${data.title}"...`);
+        } else {
+            // ЛОГИКА ДЛЯ ПРОЕКТА:
+            alert(`Спасибо! Ваша заявка на участие в проекте "${data.title}" отправлена куратору.`);
+        }
+    };
+
+    return (
+        // Затемненный фон (Backdrop)
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-300">
+            
+            {/* Контейнер модального окна */}
+            <div 
+                className="bg-[#122e41] border border-white/10 w-full max-w-2xl rounded-[40px] overflow-hidden shadow-2xl relative flex flex-col max-h-[90vh]"
+                onClick={(e) => e.stopPropagation()} // Чтобы клик внутри не закрывал окно
+            >
+                {/* Кнопка закрытия (Крестик) */}
+                <button 
+                    onClick={onClose} 
+                    className="absolute top-6 right-6 z-10 bg-black/40 hover:bg-yellow-400 hover:text-black w-10 h-10 rounded-full text-white text-2xl transition-all flex items-center justify-center font-light cursor-pointer"
+                >
+                    &times;
+                </button>
+                
+                {/* Верхняя часть с изображением */}
+                <div className="h-64 sm:h-72 overflow-hidden relative shrink-0">
+                    <img 
+                        src={data.image} 
+                        className="w-full h-full object-cover" 
+                        alt={data.title}
+                        onError={(e) => { e.currentTarget.src = "https://images.unsplash.com/photo-1449824913935-59a10b8d2000?q=80&w=800"; }} 
+                    />
+                    {/* Градиент для читаемости текста */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-[#122e41] via-[#122e41]/20 to-transparent"></div>
+                    
+                    {/* Заголовок и категория */}
+                    <div className="absolute bottom-8 left-8 sm:left-10 pr-8">
+                        <span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest mb-4 inline-block shadow-lg ${
+                            data.isService ? 'bg-sky-400 text-black' : 'bg-yellow-400 text-black'
+                        }`}>
+                            {data.category}
+                        </span>
+                        <h2 className="text-3xl sm:text-5xl font-bold text-white tracking-tighter leading-none shadow-black drop-shadow-md">
+                            {data.title}
+                        </h2>
+                    </div>
+                </div>
+
+                {/* Основной контент */}
+                <div className="p-8 sm:p-10 flex flex-col overflow-y-auto custom-scrollbar">
+                    <p className="text-gray-300 text-lg leading-relaxed mb-10 font-medium whitespace-pre-wrap">
+                        {data.desc}
+                    </p>
+
+                    {/* Футер карточки с информацией и кнопкой */}
+                    <div className="flex flex-col sm:flex-row justify-between items-center border-t border-white/5 pt-8 gap-6 mt-auto">
+                        
+                        {/* Левая часть футера: Статус или Тип */}
+                        {!data.isService && data.status && (
+                            <div className="text-center sm:text-left">
+                                <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-1">Статус проекта</p>
+                                <p className="text-white font-bold text-lg">{data.status}</p>
+                            </div>
+                        )}
+                        
+                        {data.isService && (
+                            <div className="text-center sm:text-left">
+                                <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-1">Тип доступа</p>
+                                <p className="text-sky-400 font-bold text-lg">Госуслуги / Муниципальный</p>
+                            </div>
+                        )}
+
+                        {/* Правая часть: Главная кнопка действия */}
+                        <button 
+                            onClick={handleButtonClick}
+                            className={`px-10 py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all shadow-xl active:scale-95 w-full sm:w-auto ${
+                                data.isService 
+                                    ? 'bg-sky-500 hover:bg-sky-400 text-white' 
+                                    : 'bg-yellow-400 hover:bg-yellow-500 text-black'
+                            }`}
+                        >
+                            {data.buttonText || (data.isService ? 'Перейти к сервису' : 'Подать заявку')}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+================================================================================
+
+Файл: InitiativeBanner.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+
+export const InitiativeBanner: React.FC = () => {
+  return (
+    <section className="py-12">
+      <div className="bg-white text-[#0f293b] rounded-none overflow-hidden flex flex-col md:flex-row shadow-2xl">
+        <div className="flex-1 p-12 bg-blue-700 text-white flex flex-col justify-center">
+          <h3 className="text-3xl font-bold uppercase mb-6 leading-tight tracking-tighter">
+            Проект инициативного бюджетирования «Твой Бюджет»
+          </h3>
+          <p className="text-white/80 text-lg leading-relaxed font-normal">
+            Проект дает жителям Тюмени возможность предлагать и поддерживать локальные проекты для улучшения города. Это практика активного участия граждан в городском развитии.
+          </p>
+        </div>
+        <div className="md:w-1/3 bg-white p-12 flex items-center justify-center">
+          <div className="border-4 border-blue-700 p-6 rounded-none">
+            <img src="https://i.ibb.co/hK5Wv3V/tvoi-budget-logo.png" alt="Твой Бюджет" className="w-48 h-auto" />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+================================================================================
+
+Файл: InitiativeModal.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useState } from 'react';
+import { analyzeInitiative } from '../services/gemini';
+
+export const InitiativeModal: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [formData, setFormData] = useState({ title: '', desc: '' });
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const analysis = await analyzeInitiative(formData.title, formData.desc);
+      setResult(analysis);
+      // Имитация сохранения в БД
+      const existing = JSON.parse(localStorage.getItem('initiatives') || '[]');
+      localStorage.setItem('initiatives', JSON.stringify([...existing, { ...formData, ...analysis }]));
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <div className="bg-[#122e41] border border-white/10 w-full max-w-lg rounded-[32px] p-8 shadow-2xl overflow-hidden relative">
+        <button onClick={onClose} className="absolute top-6 right-6 text-white/50 hover:text-white text-2xl">&times;</button>
+        
+        {!result ? (
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <h2 className="text-2xl font-bold text-white mb-2">Предложить идею</h2>
+            <p className="text-gray-400 text-sm">Ваша инициатива будет мгновенно проанализирована нашим цифровым ассистентом.</p>
+            
+            <input 
+              required
+              className="w-full bg-[#0b2234] border border-white/10 rounded-xl px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all"
+              placeholder="Название проекта"
+              value={formData.title}
+              onChange={e => setFormData({...formData, title: e.target.value})}
+            />
+            
+            <textarea 
+              required
+              rows={4}
+              className="w-full bg-[#0b2234] border border-white/10 rounded-xl px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all resize-none"
+              placeholder="Подробное описание..."
+              value={formData.desc}
+              onChange={e => setFormData({...formData, desc: e.target.value})}
+            />
+            
+            <button 
+              disabled={loading}
+              className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-black py-4 rounded-xl transition-all flex items-center justify-center space-x-2"
+            >
+              {loading ? (
+                <><div className="w-5 h-5 border-2 border-black/20 border-t-black rounded-full animate-spin"></div><span>Обработка ИИ...</span></>
+              ) : "Отправить на рассмотрение"}
+            </button>
+          </form>
+        ) : (
+          <div className="space-y-6 animate-in fade-in zoom-in duration-300">
+            <div className="flex items-center justify-between">
+               <h2 className="text-2xl font-bold text-white">Анализ завершен</h2>
+               <div className="bg-yellow-500 text-black px-3 py-1 rounded-full text-xs font-black">Score: {result.score}/10</div>
+            </div>
+            
+            <div className="bg-[#0b2234] p-4 rounded-2xl border border-white/5">
+               <p className="text-sm text-gray-400 mb-2 uppercase font-bold tracking-widest">Вердикт системы:</p>
+               <p className="text-white italic">"{result.feedback}"</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+               <div className="bg-white/5 p-4 rounded-xl">
+                  <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Сложность</p>
+                  <p className="text-white font-bold">{result.difficulty}</p>
+               </div>
+               <div className="bg-white/5 p-4 rounded-xl">
+                  <p className="text-[10px] text-gray-500 uppercase font-bold mb-1">Оценка бюджета</p>
+                  <p className="text-white font-bold">{result.budgetEstimate}</p>
+               </div>
+            </div>
+
+            <button 
+              onClick={onClose}
+              className="w-full bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-xl transition-all"
+            >
+              Закрыть
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+================================================================================
+
+Файл: ManagementCouncilPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { COUNCIL_TASKS } from '../constants';
+import { ApiService } from '../services/api';
+import { Member } from '../types';
+
+const TaskIcon: React.FC<{ name: string }> = ({ name }) => {
+    switch (name) {
+        case 'target': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
+        case 'folder': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>;
+        case 'ruble': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
+        case 'sync': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>;
+        case 'search': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>;
+        case 'scales': return <svg className="w-8 h-8 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" /></svg>;
+        default: return <div className="w-8 h-8 bg-yellow-400 rounded-full" />;
+    }
+}
+
+export const ManagementCouncilPage: React.FC = () => {
+    const [members, setMembers] = useState<Member[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        ApiService.getManagementStructure().then(data => {
+            setMembers(data.council);
+            setLoading(false);
+        });
+    }, []);
+
+    return (
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <h2 className="text-3xl font-bold text-white mb-10">Состав совета</h2>
+
+            {/* Глава совета */}
+            <div className="bg-[#122e41] rounded-none overflow-hidden flex flex-col md:flex-row mb-12 shadow-xl border border-white/5">
+                <div className="md:w-[400px] h-[350px] md:h-auto bg-gray-200 shrink-0">
+                    <img src="https://i.postimg.cc/Vk3Smcdc/icons8-zcina-60.png" className="w-full h-full object-cover object-top" alt="Максим Афанасьев" />
+                </div>
+                <div className="p-8 md:p-12 flex flex-col justify-center bg-[#0d2638]">
+                    <h3 className="text-2xl font-bold text-white mb-2">Максим Викторович Афанасьев</h3>
+                    <p className="text-gray-400 text-sm mb-6 uppercase tracking-wider font-bold">Глава города Тюмень</p>
+                    <p className="text-white text-lg leading-relaxed italic border-l-4 border-yellow-400 pl-6">
+                        “Цифровые технологии - это не будущее, это настоящее нашего города. Мы активно внедряем инновации, чтобы сделать жизнь горожан комфортнее и доступнее”
+                    </p>
+                </div>
+            </div>
+
+            {/* Сетка членов совета */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-20">
+                {loading ? (
+                    [1,2,3,4].map(i => <div key={i} className="aspect-square bg-white/5 animate-pulse"></div>)
+                ) : (
+                    members.map((member) => (
+                        <div key={member.id} className="group">
+                            <div className="aspect-square bg-gray-300 mb-4 overflow-hidden grayscale group-hover:grayscale-0 transition-all duration-500 w-[80%] mx-auto sm:w-full">
+                                <img src={member.imageUrl} className="w-full h-full object-cover" alt={member.name} />
+                            </div>
+                            <h4 className="font-bold text-white text-lg leading-tight mb-2 px-2">{member.name}</h4>
+                            <p className="text-gray-400 text-sm leading-tight px-2">{member.role}</p>
+                        </div>
+                    ))
+                )}
+            </div>
+
+            {/* Задачи совета */}
+            <section className="mb-12">
+                <h2 className="text-3xl font-bold text-white mb-10">Задачи совета</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-12 items-start">
+                    <div className="rounded-2xl overflow-hidden h-[600px] hidden md:block border border-white/5 relative">
+                         <img src="https://i.postimg.cc/k4WqJ1r2/tymen-admin.jpg" alt="Building" className="w-full h-full object-cover grayscale opacity-60" />
+                         <div className="absolute inset-0 bg-gradient-to-t from-[#063553] via-transparent to-transparent"></div>
+                    </div>
+                    <div className="flex flex-col gap-8">
+                        {COUNCIL_TASKS.map((task, i) => (
+                            <div key={i} className="flex gap-6 group">
+                                <div className="shrink-0 mt-1 transform group-hover:scale-110 transition-transform">
+                                    <TaskIcon name={task.icon} />
+                                </div>
+                                <div>
+                                    <h4 className="text-white font-bold text-base leading-snug mb-1 group-hover:text-yellow-400 transition-colors">{task.title}</h4>
+                                    <p className="text-gray-500 text-sm font-medium">{task.subtitle}</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: ManagementSection.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useState } from 'react';
+import { MANAGEMENT_STEPS } from '../constants';
+import { ManagementStep } from '../types';
+import { InitiativeModal } from './InitiativeModal';
+
+const StepCard: React.FC<{ step: ManagementStep; onOpen: () => void }> = ({ step, onOpen }) => (
+  <div className="bg-[#1e3a4c]/40 backdrop-blur-md p-8 rounded-[30px] flex flex-col h-full border border-white/5 hover:border-white/20 transition-all">
+    <div className="flex-grow">
+      {step.icon}
+      <h3 className="text-2xl font-bold mb-4 text-white">{step.title}</h3>
+      <p className="text-gray-300 mb-8 text-sm leading-relaxed">{step.description}</p>
+      
+      <div className="space-y-4 mb-8">
+        <div>
+          <p className="font-bold text-2xl text-yellow-400">{step.stat1_val}</p>
+          <p className="text-gray-400 text-xs uppercase tracking-widest">{step.stat1_desc}</p>
+        </div>
+        <div>
+          <p className="font-bold text-2xl text-yellow-400">{step.stat2_val}</p>
+          <p className="text-gray-400 text-xs uppercase tracking-widest">{step.stat2_desc}</p>
+        </div>
+      </div>
+    </div>
+    
+    <button 
+      onClick={onOpen}
+      className={`w-full py-4 rounded-xl font-bold transition-all shadow-lg ${step.buttonColor}`}
+    >
+      {step.buttonText}
+    </button>
+  </div>
+);
+
+export const ManagementSection: React.FC = () => {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  return (
+    <section className="py-12">
+      <h3 className="text-3xl font-bold text-white mb-12">Управляем городом вместе</h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        {MANAGEMENT_STEPS.map((step) => (
+          <StepCard key={step.id} step={step} onOpen={() => setIsModalOpen(true)} />
+        ))}
+      </div>
+      <InitiativeModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+    </section>
+  );
+};
+
+================================================================================
+
+Файл: MonitoringGroupPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { ApiService } from '../services/api';
+import { Member } from '../types';
+
+export const MonitoringGroupPage: React.FC = () => {
+    const [members, setMembers] = useState<Member[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        ApiService.getManagementStructure().then(data => {
+            setMembers(data.monitoring);
+            setLoading(false);
+        });
+    }, []);
+
+    return (
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <h2 className="text-3xl font-bold text-white mb-10">Мониторинговая группа</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
+                {loading ? [1,2].map(i => <div key={i} className="aspect-square bg-white/5 animate-pulse"></div>) :
+                members.map((m) => (
+                    <div key={m.id} className="group">
+                        <div className="aspect-square bg-gray-300 mb-4 overflow-hidden grayscale group-hover:grayscale-0 transition-all duration-500">
+                             <img src={m.imageUrl} className="w-full h-full object-cover" alt={m.name} />
+                        </div>
+                        <h4 className="font-bold text-white text-lg leading-tight mb-2">{m.name}</h4>
+                        <p className="text-gray-400 text-sm">{m.role}</p>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: NewPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React from 'react';
+
+interface NewPageProps {
+  onNavigate: (page: string) => void;
+  title: string;
+  content: string;
+}
+
+export const NewPage: React.FC<NewPageProps> = ({ onNavigate, title, content }) => {
+  return (
+    <main className="py-16 md:py-24 text-white min-h-[60vh] flex flex-col justify-center">
+      <h1 className="font-serif text-4xl md:text-6xl font-bold mb-8">{title}</h1>
+      <p className="mb-10 text-lg text-gray-300 max-w-3xl">
+        {content}
+      </p>
+      <button
+        onClick={() => onNavigate('home')}
+        className="bg-yellow-400 hover:bg-yellow-500 text-gray-800 font-bold py-3 px-6 rounded-md transition-colors self-start"
+      >
+        Вернуться на главную
+      </button>
+    </main>
+  );
+};
+================================================================================
+
+Файл: NewsSection.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React, { useEffect, useState } from 'react';
+import { NEWS_CATEGORIES } from '../constants';
+import { ApiService } from '../services/api';
+import { NewsArticle } from '../types';
+
+interface NewsSectionProps {
+  isFullPage?: boolean; 
+  limit?: number;       
+  onNavigate?: (page: string) => void;
+}
+
+export const NewsSection: React.FC<NewsSectionProps> = ({ isFullPage = true, limit, onNavigate }) => {
+  const [allNews, setAllNews] = useState<NewsArticle[]>([]);
+  const [filteredNews, setFilteredNews] = useState<NewsArticle[]>([]);
+  const [activeCategory, setActiveCategory] = useState("Все");
+  const [loading, setLoading] = useState(true);
+  
+  // Состояние для модального окна (отвечает за открытие карточки)
+  const [selectedArticle, setSelectedArticle] = useState<NewsArticle | null>(null);
+
+  useEffect(() => {
+    // Подгружаем новости, которые собрали ваши Python-парсеры
+    ApiService.getNews().then(data => {
+      setAllNews(data);
+      setFilteredNews(data);
+      setLoading(false);
+    });
+  }, []);
+
+  const handleCategoryChange = (category: string) => {
+    setActiveCategory(category);
+    if (category === "Все") {
+      setFilteredNews(allNews);
+    } else {
+      // Фильтруем по тегу (Технологии, Город и т.д.)
+      const filtered = allNews.filter(article => article.tag === category);
+      setFilteredNews(filtered);
+    }
+  };
+
+  const displayNews = limit ? filteredNews.slice(0, limit) : filteredNews;
+
+  return (
+    <section className="pt-6 pb-12">
+      <div className="flex flex-col md:flex-row justify-between items-end mb-10 gap-6">
+        <h2 className="text-3xl font-bold text-white tracking-tight">
+          {isFullPage ? 'Все цифровые новости' : 'Цифровые новости'}
+        </h2>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-12">
+        
+        {/* БОКОВОЕ МЕНЮ ТЕГОВ */}
+        <div className="md:col-span-2 col-span-12">
+          <div className="bg-transparent h-full">
+            <ul className="space-y-4 flex md:block overflow-x-auto md:overflow-visible gap-6 md:gap-0 pb-4 md:pb-0 scrollbar-hide">
+              {NEWS_CATEGORIES.map((category) => (
+                <li key={category} className="shrink-0">
+                  <button
+                    onClick={() => handleCategoryChange(category)}
+                    className={`text-left w-full text-base transition-colors font-medium ${
+                      activeCategory === category
+                        ? 'text-yellow-400 font-bold'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    {category}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        
+        {/* СПИСОК НОВОСТЕЙ */}
+        <div className="md:col-span-10 col-span-12">
+          {loading ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-12 text-gray-500 uppercase font-black animate-pulse">
+                Загрузка новостей из Тюмени...
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-12 gap-y-16">
+              {displayNews.length > 0 ? (
+                displayNews.map((article) => (
+                  <div 
+                    key={article.id} 
+                    className="bg-transparent group cursor-pointer"
+                    onClick={() => setSelectedArticle(article)} // ОТКРЫТИЕ МОДАЛКИ
+                  >
+                    <div className="overflow-hidden h-64 mb-6 rounded-2xl relative bg-white/5 border border-white/5">
+                      <div className="absolute top-4 left-4 z-10 bg-black/60 backdrop-blur-sm px-3 py-1 rounded-lg border border-white/10">
+                         <span className={`text-[10px] font-black uppercase tracking-widest ${article.tag === 'Технологии' ? 'text-sky-400' : 'text-yellow-400'}`}>
+                           {article.tag || 'Новости'}
+                         </span>
+                      </div>
+                      
+                      <img 
+                        src={article.imageUrl} 
+                        className="w-full h-full object-cover transition-transform duration-1000 group-hover:scale-105" 
+                        alt=""
+                        onError={(e) => { e.currentTarget.src = "https://images.unsplash.com/photo-1498050108023-c5249f4df085?q=80&w=800"; }}
+                      />
+                    </div>
+
+                    <h3 className="text-white font-bold text-xl mb-3 leading-tight group-hover:text-yellow-400 transition-colors">
+                      {article.title || article.description}
+                    </h3>
+                    
+                    <div className="flex items-center justify-between border-t border-white/5 pt-4">
+                      <p className="text-gray-500 text-[10px] uppercase font-bold tracking-widest">
+                        {article.date}
+                      </p>
+                      <span className="text-white/40 text-sm group-hover:translate-x-2 transition-transform font-bold">
+                        Читать далее →
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="col-span-2 py-10 text-center text-gray-500 border border-dashed border-white/10 rounded-2xl">
+                    Нет новостей в категории "{activeCategory}"
+                </div>
+              )}
+            </div>
+          )}
+          
+          <div className="mt-12 flex justify-end">
+            {!isFullPage && (
+              <button 
+                onClick={() => onNavigate && onNavigate('all-news')}
+                className="flex items-center space-x-2 text-yellow-400 hover:text-white transition-colors group border-b border-yellow-400 pb-1"
+              >
+                <span className="text-lg font-bold">Смотреть все новости</span>
+                <svg className="w-5 h-5 transform group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* МОДАЛЬНОЕ ОКНО ДЛЯ ПОЛНОГО ТЕКСТА */}
+      {selectedArticle && (
+        <div 
+          className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+          onClick={() => setSelectedArticle(null)}
+        >
+          <div 
+            className="bg-[#122e41] border border-white/10 w-full max-w-4xl h-[90vh] rounded-[32px] overflow-hidden shadow-2xl relative flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <button 
+              onClick={() => setSelectedArticle(null)}
+              className="absolute top-6 right-6 z-20 bg-black/50 hover:bg-yellow-400 hover:text-black w-10 h-10 rounded-full text-white text-2xl transition-all flex items-center justify-center"
+            >
+              &times;
+            </button>
+
+            <div className="overflow-y-auto custom-scrollbar flex-grow">
+               <div className="h-[400px] relative shrink-0">
+                  <img 
+                    src={selectedArticle.imageUrl} 
+                    className="w-full h-full object-cover" 
+                    alt="" 
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#122e41] to-transparent"></div>
+                  <div className="absolute bottom-0 left-0 p-8 md:p-12 w-full">
+                    <span className="bg-yellow-400 text-black px-3 py-1 rounded-lg text-xs font-black uppercase tracking-widest mb-4 inline-block">
+                        {selectedArticle.tag}
+                    </span>
+                    <h2 className="text-3xl md:text-5xl font-bold text-white leading-tight mb-4">
+                        {selectedArticle.title}
+                    </h2>
+                    <p className="text-gray-400 font-bold uppercase tracking-widest text-sm">
+                        {selectedArticle.date}
+                    </p>
+                  </div>
+               </div>
+
+               <div className="p-8 md:p-12">
+                   <div className="prose prose-invert prose-lg max-w-none text-gray-300 leading-relaxed whitespace-pre-wrap font-medium">
+                       {selectedArticle.full_text || selectedArticle.description}
+                   </div>
+                   
+                   {selectedArticle.link && (
+                       <div className="mt-12 pt-8 border-t border-white/10">
+                           <a 
+                             href={selectedArticle.link} 
+                             target="_blank" 
+                             rel="noreferrer"
+                             className="text-yellow-400 hover:text-white font-bold transition-colors flex items-center gap-2"
+                           >
+                             Читать оригинал на источнике ↗
+                           </a>
+                       </div>
+                   )}
+               </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+};
+================================================================================
+
+Файл: ProfilePage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { ApiService } from '../services/api';
+
+export const ProfilePage: React.FC<{ onNavigate: (p: string) => void }> = ({ onNavigate }) => {
+  const [profile, setProfile] = useState<any>(null);
+  const [initiatives, setInitiatives] = useState<any[]>([]);
+
+  useEffect(() => {
+    ApiService.getUserProfile().then(setProfile);
+    const data = JSON.parse(localStorage.getItem('initiatives') || '[]');
+    setInitiatives(data);
+  }, []);
+
+  if (!profile) return <div className="p-20 text-center">Загрузка профиля...</div>;
+
+  return (
+    <main className="py-12 animate-in fade-in duration-700">
+      <div className="flex justify-between items-center mb-12">
+        <h1 className="text-4xl font-bold">Личный кабинет</h1>
+        <button onClick={() => onNavigate('home')} className="text-gray-400 hover:text-white">Выйти</button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+        <div className="lg:col-span-1 space-y-8">
+          <div className="bg-[#122e41] p-8 rounded-[32px] border border-white/5 text-center">
+            <div className="w-32 h-32 bg-yellow-400 rounded-full mx-auto mb-6 flex items-center justify-center text-4xl text-black font-black">
+              {profile.name.split(' ').map((n:any) => n[0]).join('')}
+            </div>
+            <h3 className="text-2xl font-bold">{profile.name}</h3>
+            <p className="text-gray-400 mb-6">Уровень {profile.level} (Инноватор)</p>
+            
+            <div className="grid grid-cols-2 gap-4">
+                <div className="bg-white/5 p-4 rounded-2xl">
+                  <p className="text-[10px] text-gray-500 uppercase font-bold">Баллы</p>
+                  <p className="text-2xl font-black text-yellow-400">{profile.points}</p>
+                </div>
+                <div className="bg-white/5 p-4 rounded-2xl">
+                  <p className="text-[10px] text-gray-500 uppercase font-bold">Команды</p>
+                  <p className="text-2xl font-black text-sky-400">{profile.joinedTeams.length}</p>
+                </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-2">
+          <h2 className="text-2xl font-bold mb-6">Ваша активность в системе</h2>
+          <div className="space-y-6">
+            {initiatives.map((item, i) => (
+                <div key={i} className="bg-[#122e41] p-8 rounded-[32px] border border-white/5">
+                  <div className="flex justify-between items-start mb-4">
+                    <h4 className="text-xl font-bold">{item.title}</h4>
+                    <span className="bg-yellow-500/10 text-yellow-500 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border border-yellow-500/20">
+                        {item.status === 'UNDER_REVIEW' ? 'На рассмотрении ИИ' : 'Одобрено'}
+                    </span>
+                  </div>
+                  <p className="text-gray-400 text-sm mb-6">{item.description}</p>
+                  <div className="flex items-center space-x-6 text-xs font-bold text-gray-500">
+                      <span>AI SCORE: <span className="text-yellow-400">{item.aiScore}/10</span></span>
+                      <span>БЮДЖЕТ: <span className="text-white">{item.budget}</span></span>
+                  </div>
+                </div>
+            ))}
+            {initiatives.length === 0 && (
+                <div className="bg-white/5 p-12 rounded-[32px] border border-dashed border-white/10 text-center text-gray-500">
+                    Здесь появится история ваших предложенных проектов
+                </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+};
+
+================================================================================
+
+Файл: ProjectCreateForm.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React, { useState } from 'react';
+import { supabase } from '../services/supabase'; // Импорт клиента
+
+const FormSection: React.FC<{ title: string; children: React.ReactNode; required?: boolean }> = ({ title, children, required = false }) => (
+  <div className="mb-8">
+    <div className="flex items-center gap-3 mb-3">
+      <div className="w-6 h-6 rounded-full bg-yellow-500/10 border border-yellow-500 flex items-center justify-center shrink-0">
+        <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+      </div>
+      <label className="text-white font-bold">
+        {title}
+        {required && <span className="text-red-500 ml-1">*</span>}
+      </label>
+    </div>
+    {children}
+  </div>
+);
+
+export const ProjectCreateForm: React.FC = () => {
+    const [loading, setLoading] = useState(false);
+    const [title, setTitle] = useState('');
+    const [description, setDescription] = useState('');
+    const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+    const [keywords, setKeywords] = useState('');
+    const [initiatedBy, setInitiatedBy] = useState('');
+
+    const allCategories = ["Мероприятие", "Транспорт", "Экология", "Безопасность", "ЖКХ", "Здравоохранение", "Образование", "Урбанистика"];
+
+    const handleCategoryClick = (category: string) => {
+        setSelectedCategories(prev => 
+            prev.includes(category) 
+                ? prev.filter(c => c !== category) 
+                : [...prev, category]
+        );
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!title || !description) return alert("Заполните обязательные поля!");
+        
+        setLoading(true);
+        try {
+            const { error } = await supabase
+                .from('projects')
+                .insert([{
+                    title: title,
+                    description: description,
+                    category: selectedCategories.join(', '),
+                    team_name: initiatedBy || 'Частная инициатива',
+                    status: 'В работе',
+                    // Для красоты добавим случайную картинку из города
+                    image_url: 'https://images.unsplash.com/photo-1449824913935-59a10b8d2000?q=80&w=800'
+                }]);
+
+            if (error) throw error;
+            
+            alert('✅ Проект успешно создан и сохранен в базе Тюмени!');
+            // Очистка формы
+            setTitle('');
+            setDescription('');
+            setSelectedCategories([]);
+            setKeywords('');
+            setInitiatedBy('');
+        } catch (err: any) {
+            alert('Ошибка при создании: ' + err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="bg-[#122e41] rounded-[32px] p-8 md:p-12 border border-white/5 animate-in fade-in duration-500">
+            <form onSubmit={handleSubmit}>
+                <FormSection title="Название проекта" required>
+                    <input 
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        type="text" 
+                        placeholder="Введите название проекта..." 
+                        className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" 
+                    />
+                </FormSection>
+
+                <FormSection title="Описание проекта" required>
+                    <textarea 
+                        rows={6}
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        placeholder="Опишите суть, цели и задачи вашего проекта..." 
+                        className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all resize-none" 
+                    />
+                    <p className="text-xs text-gray-500 mt-2">
+                        Минимум 100 символов. Текущее количество: {description.length}
+                    </p>
+                </FormSection>
+
+                <FormSection title="Область проекта">
+                    <div className="flex flex-wrap gap-3">
+                        {allCategories.map(tag => (
+                            <button 
+                                key={tag} 
+                                type="button"
+                                onClick={() => handleCategoryClick(tag)}
+                                className={`px-4 py-2 rounded-full text-sm transition-colors ${
+                                    selectedCategories.includes(tag) 
+                                        ? 'bg-yellow-500 text-black font-bold' 
+                                        : 'bg-black/40 text-gray-300 hover:bg-black/60 hover:text-white'
+                                }`}
+                            >
+                                {tag}
+                            </button>
+                        ))}
+                    </div>
+                </FormSection>
+
+                <FormSection title="Ключевые слова">
+                    <input 
+                        value={keywords}
+                        onChange={(e) => setKeywords(e.target.value)}
+                        type="text" 
+                        placeholder="Например: AI, Big Data, экология, дети..." 
+                        className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" 
+                    />
+                </FormSection>
+
+                <FormSection title="Инициатор проекта">
+                    <input 
+                        value={initiatedBy}
+                        onChange={(e) => setInitiatedBy(e.target.value)}
+                        type="text" 
+                        placeholder="Название вашей команды или ФИО..." 
+                        className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" 
+                    />
+                </FormSection>
+
+                <div className="flex justify-end items-center gap-4 mt-12 border-t border-white/10 pt-8">
+                    <button 
+                        disabled={loading}
+                        type="submit" 
+                        className="bg-yellow-500 text-black font-bold py-3 px-8 rounded-lg hover:bg-yellow-600 transition-colors flex items-center gap-2 disabled:opacity-50"
+                    >
+                         {loading ? "Создание..." : (
+                            <>
+                                <svg className="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4a1 1 0 0 1 1 1v6h6a1 1 0 1 1 0 2h-6v6a1 1 0 1 1-2 0v-6H5a1 1 0 1 1 0-2h6V5a1 1 0 0 1 1-1z" /></svg>
+                                Создать проект
+                            </>
+                         )}
+                    </button>
+                </div>
+            </form>
+        </div>
+    );
+};
+================================================================================
+
+Файл: ProjectDetailView.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+import { ProjectData } from '../types';
+
+interface ProjectDetailViewProps {
+    project: ProjectData;
+    onBack: () => void;
+}
+
+const InfoChip: React.FC<{ icon: React.ReactNode; label: string; value: string | number }> = ({ icon, label, value }) => (
+    <div className="flex items-center gap-2 text-white/70 text-sm">
+        <div className="w-5 h-5">{icon}</div>
+        <span>{label}: <span className="font-bold text-white">{value}</span></span>
+    </div>
+);
+
+const Section: React.FC<{ title: string; icon: string; children: React.ReactNode }> = ({ title, icon, children }) => (
+    <div className="mb-12">
+        <div className="flex items-center gap-4 mb-6">
+            <span className="text-5xl font-bold text-yellow-400/50">{icon}</span>
+            <h3 className="text-2xl font-bold text-white">{title}</h3>
+        </div>
+        <div>{children}</div>
+    </div>
+);
+
+
+export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({ project, onBack }) => {
+
+    const isApplyButtonVisible = project.status === "В работе" || project.status === "Тестирование";
+    
+    return (
+        <div className="bg-[#0b2234] rounded-[32px] p-8 md:p-12 border border-white/5 animate-in fade-in duration-500 mt-6">
+            <button onClick={onBack} className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors mb-8 group">
+                <svg className="w-5 h-5 transform group-hover:-translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                <span>Назад к портфолио</span>
+            </button>
+            
+            {/* Header */}
+            <div className="flex flex-col md:flex-row gap-8 mb-10">
+                <div className="w-full md:w-1/3 shrink-0">
+                    <img src={project.imageUrl} alt={project.title} className="w-full aspect-square object-cover rounded-[24px]" />
+                </div>
+                <div className="flex flex-col">
+                    <h2 className="text-4xl font-bold text-white mb-2">{project.title}</h2>
+                    <p className="text-yellow-400 font-bold text-lg mb-6">{project.category}</p>
+                    
+                    <div className="space-y-3 mb-8">
+                        <InfoChip icon="📊" label="Статус" value={project.status} />
+                        <InfoChip icon="👥" label="Команда" value={project.team} />
+                        <InfoChip icon="🧑‍🤝‍🧑" label="Участников" value={project.participants} />
+                    </div>
+                    
+                    {isApplyButtonVisible && (
+                         <button className="bg-yellow-500 text-black font-bold py-3 px-6 rounded-lg hover:bg-yellow-600 transition-colors self-start">
+                            Отправить кандидатуру
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="w-full h-px bg-white/10 my-12"></div>
+
+            {/* Main Content */}
+            <Section title="Описание проекта" icon="”">
+                <p className="text-gray-300 leading-relaxed">{project.desc}</p>
+            </Section>
+
+            <Section title="Технологии" icon="⚙️">
+                <div className="flex flex-wrap gap-3">
+                    {project.tags.map(tag => (
+                        <div key={tag} className="bg-black/40 text-gray-200 px-4 py-2 rounded-lg text-sm border border-white/10">
+                           {tag}
+                        </div>
+                    ))}
+                </div>
+            </Section>
+
+            <Section title="Ключевые показатели" icon="🏆">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-[#061c2b] border border-white/10 rounded-xl p-6 flex items-center gap-4">
+                        <div className="text-3xl">⭐</div>
+                        <div>
+                            <p className="font-bold text-white text-lg">{project.rating} / 5.0</p>
+                            <p className="text-gray-400 text-sm">Средний рейтинг</p>
+                        </div>
+                    </div>
+                     <div className="bg-[#061c2b] border border-white/10 rounded-xl p-6 flex items-center gap-4">
+                        <div className="text-3xl">🗳️</div>
+                        <div>
+                            <p className="font-bold text-white text-lg">{project.votes}</p>
+                            <p className="text-gray-400 text-sm">Голосов отдано</p>
+                        </div>
+                    </div>
+                </div>
+            </Section>
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: ProjectSearchForm.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+
+const FilterSection: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <div className="mb-8">
+    <div className="flex items-center gap-3 mb-3">
+      <div className="w-6 h-6 rounded-full bg-yellow-500/10 border border-yellow-500 flex items-center justify-center shrink-0">
+        <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+      </div>
+      <label className="text-white font-bold">{title}</label>
+    </div>
+    {children}
+  </div>
+);
+
+export const ProjectSearchForm: React.FC = () => {
+    const categoryTags = ["Мероприятие", "Транспорт", "Экология", "Безопасность", "ЖКХ", "Здравоохранение", "Образование"];
+    const techTags = ["AI", "IoT", "React", "Python", "VR", "OpenCV", "Drones", "Big Data", "Blockchain"];
+
+    return (
+        <div className="bg-[#122e41] rounded-[32px] p-8 md:p-12 border border-white/5 animate-in fade-in duration-500">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-8">
+                <FilterSection title="Поиск по названию">
+                    <input type="text" placeholder="Введите название проекта..." className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                </FilterSection>
+                <FilterSection title="Поиск по руководителю">
+                    <input type="text" placeholder="Введите ФИО руководителя..." className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                </FilterSection>
+                <FilterSection title="Поиск по участнику">
+                    <input type="text" placeholder="Введите ФИО участника..." className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                </FilterSection>
+            </div>
+            
+            <div className="mt-4">
+                <FilterSection title="Поиск по категориям">
+                    <div className="flex flex-wrap gap-3">
+                        {categoryTags.map(tag => (
+                            <button key={tag} className="bg-black/40 text-gray-300 px-4 py-2 rounded-full text-sm hover:bg-black/60 hover:text-white transition-colors">{tag}</button>
+                        ))}
+                    </div>
+                </FilterSection>
+            </div>
+
+            <div className="mt-4">
+                <FilterSection title="Поиск по технологиям">
+                     <div className="flex flex-wrap gap-3">
+                        {techTags.map(tag => (
+                            <button key={tag} className="bg-black/40 text-gray-300 px-4 py-2 rounded-full text-sm hover:bg-black/60 hover:text-white transition-colors">{tag}</button>
+                        ))}
+                    </div>
+                </FilterSection>
+            </div>
+
+            <div className="flex justify-end items-center gap-4 mt-12 border-t border-white/10 pt-8">
+                <button className="bg-white/10 text-white font-bold py-3 px-6 rounded-lg hover:bg-white/20 transition-colors flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    Сбросить
+                </button>
+                <button className="bg-yellow-500 text-black font-bold py-3 px-6 rounded-lg hover:bg-yellow-600 transition-colors flex items-center gap-2">
+                    <svg className="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M10 11.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm-2.5 5.5c.28 0 .5.22.5.5s-.22.5-.5.5-.5-.22-.5-.5.22-.5.5-.5z" /><path fill-rule="evenodd" d="M20 6a2 2 0 0 0-2-2h-4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2H2a2 2 0 0 0-2 2v1.5a.5.5 0 0 0 .5.5h23a.5.5 0 0 0 .5-.5V6a2 2 0 0 0-2-2zM4 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm14 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" clip-rule="evenodd" /></svg>
+                    Поиск
+                </button>
+            </div>
+        </div>
+    )
+};
+
+================================================================================
+
+Файл: ProjectsPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { ApiService } from '../services/api';
+import { ProjectData } from '../types';
+import { ProjectSearchForm } from './ProjectSearchForm';
+import { ProjectCreateForm } from './ProjectCreateForm';
+import { ProjectTeamCreateForm } from './ProjectTeamCreateForm';
+import { ProjectDetailView } from './ProjectDetailView';
+
+type FilterType = 'all' | 'city' | 'commercial';
+const portfolioTabs = ["Портфолио проектов", "Поиск проектов", "Создание проектов", "Создание проектной команды"];
+
+const ProjectPortfolioView: React.FC<{ onProjectSelect: (project: ProjectData) => void }> = ({ onProjectSelect }) => {
+    const [allProjects, setAllProjects] = useState<ProjectData[]>([]);
+    const [filteredProjects, setFilteredProjects] = useState<ProjectData[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [activeFilter, setActiveFilter] = useState<FilterType>('all');
+
+    useEffect(() => {
+        ApiService.getProjects().then(data => {
+            setAllProjects(data);
+            setFilteredProjects(data);
+            setLoading(false);
+        });
+    }, []);
+
+    const handleFilterChange = (filter: FilterType) => {
+        setActiveFilter(filter);
+        if (filter === 'all') {
+            setFilteredProjects(allProjects);
+        } else {
+            setFilteredProjects(allProjects.filter(p => p.projectType === filter));
+        }
+    };
+
+    return (
+        <>
+            <h2 className="text-3xl font-bold text-white mb-10">Портфолио проектов в городе</h2>
+
+            <div className="flex justify-center flex-wrap gap-4 mb-10">
+                <button 
+                    onClick={() => handleFilterChange('all')}
+                    className={`px-6 py-2 rounded-lg font-bold transition-all ${activeFilter === 'all' ? 'bg-yellow-500 text-black' : 'bg-white/5 text-white hover:bg-white/10'}`}
+                >
+                    Все проекты
+                </button>
+                <button 
+                    onClick={() => handleFilterChange('city')}
+                    className={`px-6 py-2 rounded-lg font-bold transition-all ${activeFilter === 'city' ? 'bg-yellow-500 text-black' : 'bg-white/5 text-white hover:bg-white/10'}`}
+                >
+                    Городские
+                </button>
+                <button 
+                    onClick={() => handleFilterChange('commercial')}
+                    className={`px-6 py-2 rounded-lg font-bold transition-all ${activeFilter === 'commercial' ? 'bg-yellow-500 text-black' : 'bg-white/5 text-white hover:bg-white/10'}`}
+                >
+                    Коммерческие
+                </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mb-20">
+                {loading ? [1,2,3,4,5,6].map(i => <div key={i} className="h-[500px] bg-white/5 animate-pulse rounded-[30px]"></div>) :
+                filteredProjects.map(p => (
+                    <button key={p.id} onClick={() => onProjectSelect(p)} className="text-left bg-[#122e41] rounded-[30px] overflow-hidden border border-white/5 hover:border-yellow-400/30 transition-all group flex flex-col shadow-2xl focus:outline-none focus:ring-2 focus:ring-yellow-500">
+                        <div className="h-56 relative overflow-hidden">
+                            <img src={p.imageUrl} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={p.title} />
+                            <div className="absolute top-4 right-4">
+                                <span className={`px-4 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest ${p.statusColor}`}>
+                                    {p.status}
+                                </span>
+                            </div>
+                        </div>
+                        <div className="p-8 flex flex-col flex-grow">
+                            <div className="flex justify-between items-start mb-4">
+                                <div>
+                                    <h3 className="text-2xl font-bold text-white mb-1">{p.title}</h3>
+                                    <span className="text-yellow-400 text-sm font-bold uppercase tracking-widest">{p.category}</span>
+                                </div>
+                                <div className="text-right">
+                                    <div className="flex items-center text-yellow-400 font-bold">
+                                        <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+                                        {p.rating}
+                                    </div>
+                                    <div className="text-[10px] text-gray-500 font-bold">★ {p.votes}</div>
+                                </div>
+                            </div>
+                            
+                            <p className="text-gray-400 text-sm leading-relaxed mb-6 flex-grow">{p.desc}</p>
+                            
+                            <div className="flex flex-wrap gap-2 mb-8">
+                                {p.tags.map(t => (
+                                    <span key={t} className="bg-black/40 text-gray-300 px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest">
+                                        {t}
+                                    </span>
+                                ))}
+                            </div>
+
+                            <div className="flex justify-between items-center pt-6 border-t border-white/5 text-[10px] uppercase font-bold tracking-widest text-gray-400">
+                                <div className="flex items-center">
+                                    <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+                                    {p.team}
+                                </div>
+                                <div>{p.participants} участников</div>
+                            </div>
+                        </div>
+                    </button>
+                ))}
+            </div>
+            
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                {[
+                    { val: "83", label: "Всего проектов", icon: "✔️" },
+                    { val: "28", label: "В работе", icon: "💼" },
+                    { val: "420", label: "Участников", icon: "👥" },
+                    { val: "+25%", label: "Средний рейтинг", icon: "📈" }
+                ].map((s, i) => (
+                    <div key={i} className="bg-[#122e41]/60 backdrop-blur-md p-8 rounded-[24px] border border-white/5 text-center flex flex-col items-center">
+                        <div className="w-12 h-12 rounded-full bg-yellow-400/10 flex items-center justify-center text-yellow-400 text-xl mb-4 border border-yellow-400/20">{s.icon}</div>
+                        <div className="text-3xl font-black text-white mb-1">{s.val}</div>
+                        <div className="text-[10px] text-gray-400 uppercase font-black tracking-widest">{s.label}</div>
+                    </div>
+                ))}
+            </div>
+        </>
+    );
+};
+
+export const ProjectsPage: React.FC = () => {
+    const [activePortfolioTab, setActivePortfolioTab] = useState("Портфолио проектов");
+    const [selectedProject, setSelectedProject] = useState<ProjectData | null>(null);
+
+    const handleProjectSelect = (project: ProjectData) => {
+        setSelectedProject(project);
+    };
+
+    const handleBackToPortfolio = () => {
+        setSelectedProject(null);
+    };
+
+    const renderTabs = () => (
+        <div className="flex flex-wrap gap-4 mb-10 mt-6">
+            {portfolioTabs.map(tab => (
+                <button 
+                    key={tab}
+                    onClick={() => {
+                        setActivePortfolioTab(tab);
+                        setSelectedProject(null); // Сбрасываем выбранный проект при смене вкладки
+                    }}
+                    className={`px-8 py-3 rounded-xl font-bold transition-all text-base ${
+                        activePortfolioTab === tab 
+                            ? 'bg-yellow-500 text-black' 
+                            : 'bg-[#1e3a4c] text-white hover:bg-[#2a4a61]'
+                    }`}
+                >
+                    {tab}
+                </button>
+            ))}
+        </div>
+    );
+
+    const renderContent = () => {
+        if (selectedProject) {
+            return <ProjectDetailView project={selectedProject} onBack={handleBackToPortfolio} />;
+        }
+
+        switch (activePortfolioTab) {
+            case "Портфолио проектов":
+                return <ProjectPortfolioView onProjectSelect={handleProjectSelect} />;
+            case "Поиск проектов":
+                return <ProjectSearchForm />;
+            case "Создание проектов":
+                return <ProjectCreateForm />;
+            case "Создание проектной команды":
+                return <ProjectTeamCreateForm />;
+            default:
+                return <ProjectPortfolioView onProjectSelect={handleProjectSelect} />;
+        }
+    };
+
+    return (
+        <div className="animate-in fade-in duration-700 pb-20">
+            {/* Рендерим табы только если не выбран проект */}
+            {!selectedProject && renderTabs()}
+            {renderContent()}
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: ProjectsSection.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React, { useEffect, useState } from 'react';
+import { supabase } from '../services/supabase';
+import { PROJECT_CATEGORIES } from '../constants';
+import { InfoModal } from './InfoModal';
+
+export const ProjectsSection: React.FC = () => {
+  const [allProjects, setAllProjects] = useState<any[]>([]);
+  const [filteredProjects, setFilteredProjects] = useState<any[]>([]);
+  const [activeCategory, setActiveCategory] = useState("Все");
+  const [selectedProject, setSelectedProject] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchProjects = async () => {
+      setLoading(true);
+      // Запрашиваем ВСЕ проекты из базы без ограничений
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .order('votes', { ascending: false }); // Сортируем по количеству голосов (популярности)
+
+      if (data) {
+        setAllProjects(data);
+        setFilteredProjects(data);
+      }
+      setLoading(false);
+    };
+    fetchProjects();
+  }, []);
+
+  const handleFilter = (category: string) => {
+    setActiveCategory(category);
+    if (category === "Все") {
+      setFilteredProjects(allProjects);
+    } else {
+      // Регистронезависимая фильтрация для надежности
+      setFilteredProjects(allProjects.filter(p => 
+        p.category?.toLowerCase().includes(category.toLowerCase())
+      ));
+    }
+  };
+
+  return (
+    <section className="py-12">
+      <div className="flex justify-between items-end mb-10">
+        <div>
+          <h2 className="text-3xl font-bold text-white tracking-tight">Цифровые проекты города</h2>
+          <p className="text-gray-500 mt-2">Инновационные разработки тюменских команд в реальном времени</p>
+        </div>
+      </div>
+      
+      <div className="grid grid-cols-12 gap-8 md:gap-12">
+        {/* ФИЛЬТРЫ */}
+        <div className="col-span-12 md:col-span-2">
+          <ul className="space-y-4 flex md:block overflow-x-auto md:overflow-visible gap-6 pb-4 md:pb-0 scrollbar-hide">
+            {PROJECT_CATEGORIES.map((cat) => (
+              <li key={cat} className="shrink-0">
+                <button
+                  onClick={() => handleFilter(cat)}
+                  className={`text-left w-full text-base transition-all font-medium ${
+                    activeCategory === cat ? 'text-yellow-400 font-bold border-b-2 border-yellow-400 md:border-none' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {cat}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* СЕТКА (Отображаем всё, что есть в базе) */}
+        <div className="col-span-12 md:col-span-10">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            {loading ? (
+              [1, 2, 3, 4, 5, 6, 7, 8].map(i => <div key={i} className="bg-white/5 h-72 rounded-[30px] animate-pulse"></div>)
+            ) : filteredProjects.length > 0 ? (
+              filteredProjects.map((project) => (
+                <div 
+                  key={project.id} 
+                  onClick={() => setSelectedProject(project)}
+                  className="bg-[#1e3a4c]/40 rounded-[30px] overflow-hidden group flex flex-col border border-white/5 hover:border-yellow-400/30 transition-all cursor-pointer shadow-xl relative"
+                >
+                  <div className="h-44 overflow-hidden relative">
+                    <img 
+                      src={project.image_url} 
+                      className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" 
+                      alt="" 
+                    />
+                    <div className="absolute top-4 left-4 bg-yellow-500 text-black text-[9px] font-black uppercase px-2 py-1 rounded shadow-lg z-10">
+                      {project.category}
+                    </div>
+                  </div>
+                  <div className="p-6 flex flex-col flex-grow">
+                    <h3 className="text-white font-bold text-lg mb-2 leading-tight line-clamp-2 group-hover:text-yellow-400 transition-colors">
+                        {project.title}
+                    </h3>
+                    <p className="text-gray-400 text-[11px] mb-4 line-clamp-3 leading-relaxed flex-grow">
+                        {project.description}
+                    </p>
+                    <div className="flex justify-between items-center mt-auto pt-4 border-t border-white/5">
+                        <span className="text-[9px] text-gray-500 font-bold uppercase tracking-widest">{project.status}</span>
+                        <span className="text-yellow-500 text-[10px] font-black uppercase tracking-widest">⭐ {project.votes}</span>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="col-span-full py-20 text-center border-2 border-dashed border-white/5 rounded-[40px] text-gray-500 font-bold uppercase tracking-widest text-xs">
+                Проекты в категории "{activeCategory}" не найдены
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {selectedProject && (
+        <InfoModal 
+          data={{
+            title: selectedProject.title,
+            desc: selectedProject.description,
+            category: selectedProject.category,
+            image: selectedProject.image_url,
+            status: selectedProject.status,
+            isService: false,
+            buttonText: 'Подать заявку'
+          }}
+          onClose={() => setSelectedProject(null)} 
+        />
+      )}
+    </section>
+  );
+};
+================================================================================
+
+Файл: ProjectTeamCreateForm.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useState } from 'react';
+
+const FormSection: React.FC<{ title: string; children: React.ReactNode; required?: boolean }> = ({ title, children, required = false }) => (
+  <div className="mb-8">
+    <div className="flex items-center gap-3 mb-3">
+      <div className="w-6 h-6 rounded-full bg-yellow-500/10 border border-yellow-500 flex items-center justify-center shrink-0">
+        <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+      </div>
+      <label className="text-white font-bold">
+        {title}
+        {required && <span className="text-red-500 ml-1">*</span>}
+      </label>
+    </div>
+    {children}
+  </div>
+);
+
+export const ProjectTeamCreateForm: React.FC = () => {
+    const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+    const allSkills = ["Frontend Dev", "Backend Dev", "UI/UX Designer", "Data Scientist", "Project Manager", "QA Engineer", "DevOps"];
+
+    const handleSkillClick = (skill: string) => {
+        setSelectedSkills(prev =>
+            prev.includes(skill)
+                ? prev.filter(s => s !== skill)
+                : [...prev, skill]
+        );
+    };
+
+    return (
+        <div className="bg-[#122e41] rounded-[32px] p-8 md:p-12 border border-white/5 animate-in fade-in duration-500">
+            <form>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8">
+                    <FormSection title="Название команды" required>
+                        <input type="text" placeholder="Например: 'EcoWarriors'" className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                    </FormSection>
+
+                    <FormSection title="Проект для команды" required>
+                         <input type="text" placeholder="Начните вводить название проекта..." className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                    </FormSection>
+                </div>
+
+                <FormSection title="Миссия и цели команды">
+                    <textarea
+                        rows={4}
+                        placeholder="Кратко опишите, над чем будет работать команда и какие цели преследует..."
+                        className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all resize-none"
+                    />
+                </FormSection>
+
+                <FormSection title="Требуемые роли и навыки">
+                    <div className="flex flex-wrap gap-3">
+                        {allSkills.map(skill => (
+                            <button
+                                key={skill}
+                                type="button"
+                                onClick={() => handleSkillClick(skill)}
+                                className={`px-4 py-2 rounded-full text-sm transition-colors ${
+                                    selectedSkills.includes(skill)
+                                        ? 'bg-yellow-500 text-black font-bold'
+                                        : 'bg-black/40 text-gray-300 hover:bg-black/60 hover:text-white'
+                                }`}
+                            >
+                                {skill}
+                            </button>
+                        ))}
+                    </div>
+                     <p className="text-xs text-gray-500 mt-2">Выберите ключевые компетенции, необходимые для проекта.</p>
+                </FormSection>
+                
+                <FormSection title="Кого мы ищем?">
+                    <input type="text" placeholder="Например: 'Ищем 2 frontend-разработчиков с опытом React'" className="w-full bg-[#0b2234] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-yellow-500 outline-none transition-all" />
+                     <p className="text-xs text-gray-500 mt-2">Опишите, сколько и каких специалистов вы хотите пригласить.</p>
+                </FormSection>
+
+
+                <div className="flex justify-end items-center gap-4 mt-12 border-t border-white/10 pt-8">
+                    <button type="button" className="bg-white/10 text-white font-bold py-3 px-6 rounded-lg hover:bg-white/20 transition-colors flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
+                        Сохранить черновик
+                    </button>
+                    <button type="submit" className="bg-yellow-500 text-black font-bold py-3 px-6 rounded-lg hover:bg-yellow-600 transition-colors flex items-center gap-2">
+                         <svg className="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M18 15a3 3 0 100-6 3 3 0 000 6zM6 15a3 3 0 100-6 3 3 0 000 6zM12 16.5a4.5 4.5 0 100-9 4.5 4.5 0 000 9zM12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2z"></path></svg>
+                        Создать команду
+                    </button>
+                </div>
+            </form>
+        </div>
+    );
+};
+
+================================================================================
+
+Файл: ResourcesSection.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React from 'react';
+import { RESOURCES } from '../constants';
+import { Resource } from '../types';
+
+const ResourceCard: React.FC<{ resource: Resource }> = ({ resource }) => (
+  <div className="bg-[#1e3a4c] rounded-lg p-6 flex flex-col items-center justify-center text-center h-40">
+    {typeof resource.icon === 'string' ? (
+      <img src={resource.icon} alt={resource.name} className="w-12 h-12 mb-3 object-contain" />
+    ) : (
+      <div className="mb-3">{resource.icon}</div>
+    )}
+    <p className="text-sm font-medium">{resource.name}</p>
+  </div>
+);
+
+export const ResourcesSection: React.FC = () => {
+  return (
+    <section className="py-16 md:py-24">
+      <h2 className="font-serif text-4xl md:text-5xl font-bold mb-10 text-center">Полезные ресурсы</h2>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-6">
+        {RESOURCES.map((resource) => (
+          <ResourceCard key={resource.id} resource={resource} />
+        ))}
+      </div>
+    </section>
+  );
+};
+
+================================================================================
+
+Файл: ServicesPage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+import React, { useEffect, useState } from 'react';
+import { supabase } from '../services/supabase';
+
+export const ServicesPage: React.FC = () => {
+  const [services, setServices] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeCat, setActiveCat] = useState("Все");
+  const [categories, setCategories] = useState<string[]>(["Все"]);
+
+  useEffect(() => {
+    const fetchServices = async () => {
+      setLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('services')
+          .select('*')
+          .order('id', { ascending: true });
+
+        if (error) throw error;
+
+        if (data) {
+          setServices(data);
+          // Автоматически вытягиваем уникальные категории из базы
+          const uniqueCats = ["Все", ...new Set(data.map((s: any) => s.category))];
+          setCategories(uniqueCats);
+        }
+      } catch (err) {
+        console.error("Ошибка загрузки сервисов:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchServices();
+  }, []);
+
+  const filtered = activeCat === "Все" 
+    ? services 
+    : services.filter(s => s.category === activeCat);
+
+  return (
+    <main className="py-12 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-10 gap-6">
+        <div>
+          <h1 className="text-4xl font-bold mb-3 tracking-tight">Цифровые сервисы Тюмени</h1>
+          <p className="text-gray-400 font-medium">Готовые государственные и муниципальные инструменты для жизни в городе</p>
+        </div>
+        <div className="text-right hidden md:block">
+            <span className="text-yellow-400 font-black text-3xl">{services.length}</span>
+            <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest">Активных сервисов</p>
+        </div>
+      </div>
+      
+      {/* Фильтры */}
+      <div className="flex flex-wrap gap-3 mb-12">
+        {categories.map(cat => (
+          <button 
+            key={cat}
+            onClick={() => setActiveCat(cat)}
+            className={`px-6 py-2.5 rounded-xl font-bold text-sm transition-all border ${
+              activeCat === cat 
+                ? 'bg-yellow-400 text-black border-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.3)]' 
+                : 'bg-white/5 text-gray-400 border-white/5 hover:border-white/20 hover:text-white'
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {/* Сетка сервисов */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+        {loading ? (
+          // Скелетон при загрузке
+          [1, 2, 3, 4].map(i => (
+            <div key={i} className="bg-[#122e41] h-80 rounded-[32px] animate-pulse border border-white/5"></div>
+          ))
+        ) : (
+          filtered.map(service => (
+            <div 
+              key={service.id} 
+              className="bg-[#122e41] rounded-[32px] border border-white/5 hover:border-yellow-400/30 transition-all group cursor-pointer overflow-hidden flex flex-col shadow-2xl"
+            >
+              {/* Превью картинка */}
+              <div className="h-44 relative overflow-hidden">
+                <img 
+                  src={service.image_url} 
+                  alt={service.title}
+                  className="w-full h-full object-cover grayscale-[0.5] group-hover:grayscale-0 group-hover:scale-110 transition-all duration-700" 
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#122e41] to-transparent"></div>
+                <div className="absolute top-4 left-4">
+                  <span className="bg-black/60 backdrop-blur-md text-white text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-lg border border-white/10">
+                    {service.category}
+                  </span>
+                </div>
+              </div>
+
+              {/* Контент */}
+              <div className="p-7 flex flex-col flex-grow">
+                <h3 className="text-xl font-bold mb-2 group-hover:text-yellow-400 transition-colors leading-tight">
+                    {service.title}
+                </h3>
+                <p className="text-gray-400 text-sm mb-6 line-clamp-3 leading-relaxed flex-grow">
+                    {service.description}
+                </p>
+                <button className="w-full bg-yellow-400/10 hover:bg-yellow-400 text-yellow-400 hover:text-black py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all border border-yellow-400/20">
+                  {service.button_text || 'Подробнее'}
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+
+        {!loading && filtered.length === 0 && (
+          <div className="col-span-full py-20 text-center border-2 border-dashed border-white/5 rounded-[40px]">
+            <p className="text-gray-500 font-bold uppercase tracking-widest">В этой категории пока нет сервисов</p>
+          </div>
+        )}
+      </div>
+    </main>
+  );
+};
+================================================================================
+
+Файл: SmartCityLayout.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useState } from 'react';
+import { ManagementCouncilPage } from './ManagementCouncilPage';
+import { WorkingCommitteePage } from './WorkingCommitteePage';
+import { MonitoringGroupPage } from './MonitoringGroupPage';
+
+export const SmartCityLayout: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'council' | 'committee' | 'monitoring'>('council');
+
+  return (
+    <div className="animate-in fade-in duration-500">
+      {/* Sub Navigation */}
+      <div className="mb-10 border-b border-white/10">
+        <div className="flex flex-col md:flex-row gap-4 md:gap-12 pb-4">
+          <button
+            onClick={() => setActiveTab('council')}
+            className={`text-lg font-bold transition-all ${
+              activeTab === 'council' ? 'text-white' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Совет умного города
+          </button>
+          <button
+            onClick={() => setActiveTab('committee')}
+            className={`text-lg font-bold transition-all ${
+              activeTab === 'committee' ? 'text-white' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Рабочий комитет
+          </button>
+          <button
+            onClick={() => setActiveTab('monitoring')}
+            className={`text-lg font-bold transition-all ${
+              activeTab === 'monitoring' ? 'text-white' : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Мониторинговая группа
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="min-h-[60vh]">
+        {activeTab === 'council' && <ManagementCouncilPage />}
+        {activeTab === 'committee' && <WorkingCommitteePage />}
+        {activeTab === 'monitoring' && <MonitoringGroupPage />}
+      </div>
+    </div>
+  );
+};
+
+================================================================================
+
+Файл: WorkingCommitteePage.tsx
+Путь: C:\tyumen-smart-city (14)\components
+--------------------------------------------------
+
+import React, { useEffect, useState } from 'react';
+import { ApiService } from '../services/api';
+import { Member } from '../types';
+
+export const WorkingCommitteePage: React.FC = () => {
+    const [members, setMembers] = useState<Member[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        ApiService.getManagementStructure().then(data => {
+            setMembers(data.committee);
+            setLoading(false);
+        });
+    }, []);
+
+    return (
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <h2 className="text-3xl font-bold text-white mb-10">Рабочий комитет</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 mb-20">
+                {loading ? [1,2,3,4].map(i => <div key={i} className="aspect-square bg-white/5 animate-pulse"></div>) :
+                members.map((m) => (
+                    <div key={m.id} className="group">
+                        <div className="aspect-square bg-gray-300 mb-4 overflow-hidden grayscale group-hover:grayscale-0 transition-all duration-500">
+                             <img src={m.imageUrl} className="w-full h-full object-cover" alt={m.name} />
+                        </div>
+                        <h4 className="font-bold text-white text-lg leading-tight mb-2">{m.name}</h4>
+                        <p className="text-gray-400 text-sm">{m.role}</p>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+================================================================================
+

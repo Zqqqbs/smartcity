@@ -1,0 +1,1040 @@
+Директория: C:\tyumen-smart-city (14)
+================================================================================
+
+Файл: ai.py
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import sqlite3
+import requests
+
+API_KEY = "sk-2458de03176
+API_URL = "https://api.deepseek.com/chat/completions"
+
+def get_full_context():
+    conn = sqlite3.connect('city.db')
+    cursor = conn.cursor()
+
+    # Собираем данные: Проект + Команда + Вакансии
+    cursor.execute('''
+        SELECT 
+            p.title, p.full_description, p.category,
+            t.name, t.culture,
+            n.required_skill, n.description
+        FROM team_needs n
+        JOIN teams t ON n.team_id = t.id
+        JOIN projects p ON t.project_id = p.id
+    ''')
+    data = cursor.fetchall()
+    conn.close()
+
+    context = "АКТУАЛЬНЫЕ ПРОЕКТЫ И КОМАНДЫ ТЮМЕНИ:\n\n"
+    for row in data:
+        context += f"ПРОЕКТ: {row[0]} ({row[2]})\n"
+        context += f"О проекте: {row[1]}\n"
+        context += f"КОМАНДА: {row[3]}\n"
+        context += f"Культура в команде: {row[4]}\n"
+        context += f"КТО НУЖЕН: {row[5]} - {row[6]}\n"
+        context += "-" * 30 + "\n"
+    return context
+
+def ask_ai(question):
+    context = get_full_context()
+    
+    system_instruction = """
+    Ты — экспертный ментор портала 'Умный город Тюмень'. 
+    Твоя цель: идеально сопоставить навыки пользователя с потребностями команд.
+    Обращай внимание на 'мягкие' условия: если команда готова учить — предлагай её новичкам. 
+    Если команда на удаленке — делай на этом акцент.
+    
+    ОБЯЗАТЕЛЬНО:
+    1. Указывай название проекта и команды.
+    2. Объясняй, ПОЧЕМУ ты это рекомендуешь (например: 'Они готовы обучать OpenCV').
+    3. Используй дружелюбный тон.
+    """
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": f"ДАННЫЕ:\n{context}\n\nВОПРОС ПОЛЬЗОВАТЕЛЯ: {question}"}
+        ]
+    }
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(API_URL, json=payload, headers=headers)
+        return response.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"Ошибка: {e}"
+
+# Простой цикл общения
+while True:
+    q = input("Вы (введите навыки или вопрос): ")
+    if q.lower() in ['exit', 'quit']: break
+    print("\nАссистент подбирает варианты...")
+    print(ask_ai(q))
+    print("\n" + "="*50 + "\n")
+================================================================================
+
+Файл: AIChat.tsx
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import React, { useState, useRef, useEffect } from 'react';
+import { supabase } from '../services/supabase';
+import { InfoModal } from './InfoModal';
+
+interface Message {
+    role: 'user' | 'ai';
+    text: string;
+}
+
+export const AIChat: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
+    const [messages, setMessages] = useState<Message[]>([
+        { role: 'ai', text: 'Привет! Я ИИ-консультант Тюмени. Чем могу помочь? (ЖКХ, транспорт, медицина или ИТ-инициативы)' }
+    ]);
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [selectedItem, setSelectedItem] = useState<any>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }, [messages, loading]);
+
+    
+    const parseMessage = (text: string) => {
+        const cleanText = text.replace(/\*\*?/g, '');
+        
+        
+        const parts = cleanText.split(/(\[\[(?:проект|сервис):\d+\|.+?\]\])/g);
+        
+        return parts.map((part, i) => {
+            if (part.startsWith('[[') && part.includes('|')) {
+                
+                const content = part.slice(2, -2); 
+                const [meta, label] = content.split('|'); 
+                const [type, id] = meta.split(':'); 
+                
+                const isProject = type === 'проект';
+
+                return (
+                    <button 
+                        key={i}
+                        onClick={async () => {
+                            console.log(`Загрузка: ${type} ID=${id}`);
+                            const table = isProject ? 'projects' : 'services';
+                            
+                            const { data, error } = await supabase
+                                .from(table)
+                                .select('*')
+                                .eq('id', id)
+                                .single();
+
+                            if (error || !data) {
+                                alert("Ошибка: карточка не найдена в базе (возможно, удалена).");
+                                return;
+                            }
+
+                            
+                            setSelectedItem({
+                                title: data.title,
+                                desc: data.description,
+                                category: data.category,
+                                image: data.image_url,
+                                isService: !isProject, 
+                                
+                                buttonText: isProject ? 'Подать заявку' : (data.button_text || 'Перейти к сервису'),
+                                status: isProject ? data.status : undefined
+                            });
+                        }}
+                        className={`mx-1 px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all inline-flex items-center gap-2 shadow-sm border whitespace-nowrap my-1 ${
+                            isProject 
+                            ? 'bg-yellow-400/10 text-yellow-400 border-yellow-400/30 hover:bg-yellow-400 hover:text-black' 
+                            : 'bg-sky-400/10 text-sky-300 border-sky-400/30 hover:bg-sky-500 hover:text-white'
+                        }`}
+                    >
+                        {isProject ? '🚀' : '🏛'} {label} 
+                        <span className="opacity-50 text-[10px]">↗</span>
+                    </button>
+                );
+            }
+            return part;
+        });
+    };
+
+    const handleSend = async () => {
+        if (!input.trim() || loading) return;
+
+        const userMsg = input;
+        setInput('');
+        setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+        setLoading(true);
+
+        try {
+            
+            const [projectsRes, servicesRes] = await Promise.all([
+                supabase.from('projects').select('id, title, category, description'),
+                supabase.from('services').select('id, title, category, description')
+            ]);
+
+            
+            const servicesList = servicesRes.data?.map(s => 
+                `ID:${s.id} | НАЗВАНИЕ: "${s.title}" | СУТЬ: ${s.description}`
+            ).join('\n') || "";
+
+            const projectsList = projectsRes.data?.map(p => 
+                `ID:${p.id} | НАЗВАНИЕ: "${p.title}" | СУТЬ: ${p.description}`
+            ).join('\n') || "";
+
+            const fullCityContext = `
+                === СПИСОК ГОРОДСКИХ СЕРВИСОВ (ДЛЯ ЖИТЕЛЕЙ) ===
+                ${servicesList}
+
+                === СПИСОК ИТ-ПРОЕКТОВ (ДЛЯ РАЗРАБОТЧИКОВ/ИННОВАТОРОВ) ===
+                ${projectsList}
+            `;
+
+            
+            const response = await fetch('https:
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${import.meta.env.VITE_DEEPSEEK_API_KEY}` 
+                },
+                body: JSON.stringify({
+                    model: "deepseek-chat",
+                    messages: [
+                        { 
+                            role: "system", 
+                            content: `Ты — ИИ-консультант "Умный город Тюмень".
+                            
+                            ТВОЯ БАЗА ЗНАНИЙ:
+                            ${fullCityContext}
+                            
+                            СТРОГИЕ ПРАВИЛА (НЕ НАРУШАТЬ):
+                            1. ССЫЛКИ: Всегда используй формат: [[тип:ID|Название]].
+                               Пример: [[сервис:5|Городской Wi-Fi]] или [[проект:12|Умный светофор]].
+                            
+                            2. РЕЛЕВАНТНОСТЬ:
+                               - Если пользователь спрашивает про ЖКХ, больницы, школы, транспорт -> ПРЕДЛАГАЙ ТОЛЬКО СЕРВИСЫ. Не смей предлагать проекты! Проекты тут не помогут, человеку нужно решение проблемы.
+                               - Если пользователь говорит "хочу команду", "я программист", "есть идея" -> ПРЕДЛАГАЙ ПРОЕКТЫ.
+                            
+                            3. ТОЧНОСТЬ:
+                               - Бери ID и Название СТРОГО из базы знаний выше. Не выдумывай ID.
+                            
+                            4. СТИЛЬ:
+                               - Отвечай кратко и по делу. Без воды.` 
+                        },
+                        { role: "user", content: userMsg }
+                    ],
+                    temperature: 0.3 
+                })
+            });
+
+            if (!response.ok) throw new Error("API Error");
+            const data = await response.json();
+            setMessages(prev => [...prev, { role: 'ai', text: data.choices[0].message.content }]);
+
+        } catch (e) {
+            console.error(e);
+            setMessages(prev => [...prev, { role: 'ai', text: 'Ошибка соединения с сервером.' }]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <>
+            <div className="fixed bottom-10 right-10 z-[200] flex flex-col bg-[#122e41] border border-white/10 rounded-[30px] shadow-2xl animate-in slide-in-from-bottom-5 duration-500 overflow-hidden"
+                style={{ width: '400px', height: '600px', maxWidth: '90vw', resize: 'both' }}>
+                
+                {}
+                <div className="flex-none p-5 border-b border-white/10 flex justify-between items-center bg-[#0b2234]">
+                    <div className="flex items-center space-x-3">
+                        <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+                        <span className="font-bold text-xs uppercase tracking-widest text-white">Тюмень.Ассистент</span>
+                    </div>
+                    <button onClick={onClose} className="text-white/50 hover:text-white text-2xl">&times;</button>
+                </div>
+
+                {}
+                <div ref={scrollRef} className="flex-grow p-6 overflow-y-auto space-y-6 bg-[#0f2536] custom-scrollbar">
+                    {messages.map((m, i) => (
+                        <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[90%] p-4 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap shadow-md ${
+                                m.role === 'user' ? 'bg-yellow-500 text-black font-medium' : 'bg-[#1a3a4d] text-white'
+                            }`}>
+                                {m.role === 'ai' ? parseMessage(m.text) : m.text}
+                            </div>
+                        </div>
+                    ))}
+                    {loading && <div className="text-xs text-white/30 text-center animate-pulse">Поиск информации...</div>}
+                </div>
+
+                {}
+                <div className="p-4 bg-[#0b2234] border-t border-white/5">
+                    <div className="flex gap-2">
+                        <input 
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                            placeholder="Например: как записать ребенка в школу?"
+                            className="flex-grow bg-[#122e41] px-4 py-3 rounded-xl text-sm text-white outline-none focus:ring-1 focus:ring-yellow-400/50 transition-all"
+                        />
+                        <button onClick={handleSend} disabled={loading} className="bg-yellow-500 text-black p-3 rounded-xl hover:bg-yellow-400 transition-colors">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {selectedItem && (
+                <InfoModal 
+                    data={selectedItem}
+                    onClose={() => setSelectedItem(null)} 
+                />
+            )}
+        </>
+    );
+};
+================================================================================
+
+Файл: App.tsx
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+// App.tsx
+import React, { useState } from 'react';
+import { Header } from './components/Header';
+import { Hero } from './components/Hero';
+import { NewsSection } from './components/NewsSection';
+import { ManagementSection } from './components/ManagementSection';
+import { ProjectsSection } from './components/ProjectsSection';
+import { InitiativeBanner } from './components/InitiativeBanner';
+import { DevelopmentDecisionBanner } from './components/DevelopmentDecisionBanner';
+import { Footer } from './components/Footer';
+import { CampusPage } from './components/CampusPage';
+import { ServicesPage } from './components/ServicesPage';
+import { ProjectsPage } from './components/ProjectsPage';
+import { ProfilePage } from './components/ProfilePage';
+import { SmartCityLayout } from './components/SmartCityLayout';
+import { AIChat } from './components/AIChat'; 
+
+const App: React.FC = () => {
+  const [currentPage, setCurrentPage] = useState('home');
+  const [isChatOpen, setIsChatOpen] = useState(false); 
+
+  const navigate = (page: string) => {
+    setCurrentPage(page);
+    window.scrollTo(0, 0);
+  };
+
+  const renderContent = () => {
+    switch (currentPage) {
+      case 'campus':
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage={currentPage} />
+            <CampusPage />
+          </>
+        );
+      case 'services':
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage={currentPage} />
+            <ServicesPage />
+          </>
+        );
+      case 'projects':
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage={currentPage} />
+            <ProjectsPage />
+          </>
+        );
+      case 'profile':
+        return <ProfilePage onNavigate={navigate} />;
+      case 'newPage':
+        return <ProfilePage onNavigate={navigate} />;  
+ 
+	  case 'management':
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage={currentPage} />
+            <SmartCityLayout />
+          </>
+        );
+      // НОВЫЙ КЕЙС: Страница всех новостей
+      case 'all-news':
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage="home" /> {/* Оставляем активным home или добавляем new */}
+            <main>
+              {/* Передаем isFullPage={true} чтобы показать фильтры и все новости */}
+              <NewsSection isFullPage={true} onNavigate={navigate} />
+            </main>
+          </>
+        );
+      case 'home':
+      default:
+        return (
+          <>
+            <Hero onNavigate={navigate} currentPage={currentPage} />
+            <main>
+              {/* На главной ограничиваем до 4 штук и скрываем фильтры */}
+              <NewsSection isFullPage={false} limit={4} onNavigate={navigate} />
+              
+              <DevelopmentDecisionBanner />
+              <ManagementSection />
+              <ProjectsSection />
+              <InitiativeBanner />
+            </main>
+          </>
+        );
+    }
+  };
+
+  return (
+    <div className="bg-[#063553] text-white min-h-screen selection:bg-yellow-400 selection:text-black">
+      <div className="w-[81.25%] mx-auto">
+        <Header 
+          onNavigate={navigate} 
+          onOpenChat={() => setIsChatOpen(true)} 
+        />
+        
+        {renderContent()}
+
+        <AIChat 
+          isOpen={isChatOpen} 
+          onClose={() => setIsChatOpen(false)} 
+        />
+      </div>
+
+      <div className="w-full mt-20">
+        <Footer />
+      </div>
+    </div>
+  );
+};
+
+export default App;
+================================================================================
+
+Файл: constants.tsx
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import React from 'react';
+import { 
+  ProjectData, 
+  StudentStory, 
+  CampusTeam, 
+  CampusEvent, 
+  Resource, 
+  NewsArticle, 
+  EventItem, 
+  ManagementStep, 
+  Member, 
+  ServiceItem 
+} from './types';
+
+export const PROJECTS_LIST: ProjectData[] = [
+  { id: 1, title: "SmartTraffic AI", status: "В работе", statusColor: "bg-blue-600", category: "Транспорт", rating: 4.7, votes: 345, desc: "Система адаптивного управления светофорами на базе компьютерного зрения для борьбы с пробками", tags: ["AI", "Traffic", "Транспорт"], team: "RoadMasters", participants: 5, imageUrl: "https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?q=80&w=600", projectType: 'city' },
+  { id: 2, title: "EcoBin Sensors", status: "Тестирование", statusColor: "bg-yellow-500 text-black", category: "Экология", rating: 3.9, votes: 54, desc: "IoT-датчики наполняемости мусорных контейнеров для оптимизации маршрутов мусоровозов", tags: ["IoT", "Hardware", "Green"], team: "CleanCity", participants: 3, imageUrl: "https://images.unsplash.com/photo-1532996122724-e3c354a0b15b?q=80&w=600", projectType: 'city' },
+  { id: 3, title: "SolarBench", status: "Завершено", statusColor: "bg-green-500", category: "Урбанистика", rating: 4.5, votes: 32, desc: "Умные городские скамейки с солнечными панелями, подогревом и зарядками для телефонов", tags: ["Solar", "Design", "Public"], team: "SunRise", participants: 4, imageUrl: "https://images.unsplash.com/photo-1557310717-d6bea9f36682?q=80&w=600", projectType: 'commercial' },
+  { id: 4, title: "HelpHand App", status: "В работе", statusColor: "bg-blue-600", category: "Социальное", rating: 4.1, votes: 2132, desc: "Агрегатор волонтерских заданий города с системой рейтинга и поощрений для активистов", tags: ["Mobile", "Social", "App"], team: "GoodHearts", participants: 6, imageUrl: "https://images.unsplash.com/photo-1559027615-cd91459a397e?q=80&w=600", projectType: 'city' },
+  { id: 5, title: "SkyPatrol", status: "Приостановлено", statusColor: "bg-orange-600", category: "Безопасность", rating: 3.9, votes: 687, desc: "Система мониторинга лесных пожаров в пригороде с помощью автономных дронов", tags: ["Drones", "CV", "Safety"], team: "AeroGuard", participants: 3, imageUrl: "https://images.unsplash.com/photo-1508614589041-895b88991e3e?q=80&w=600", projectType: 'city' },
+  { id: 6, title: "EduVR History", status: "Тестирование", statusColor: "bg-yellow-500 text-black", category: "Образование", rating: 5.0, votes: 1257, desc: "Виртуальные экскурсии по исторической Тюмени 19 века для школьных уроков истории", tags: ["VR", "History", "EdTech"], team: "TimeTravel", participants: 4, imageUrl: "https://images.unsplash.com/photo-1592478411213-6153e4ebc07d?q=80&w=600", projectType: 'commercial' }
+];
+
+export const SERVICES_LIST: ServiceItem[] = [
+  { id: 1, title: "Оплата ЖКХ", category: "ЖКХ", desc: "Передача показаний счетчиков, оплата единой квитанции без комиссии и архив начислений.", imageUrl: "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?q=80&w=600", buttonText: "Подробнее" },
+  { id: 2, title: "Транспортная карта", category: "Транспорт", desc: "Проверка баланса карты ТТС, пополнение счета онлайн и управление льготными проездными.", imageUrl: "https://images.unsplash.com/photo-1570125909232-eb263c18692c?q=80&w=600", buttonText: "Подробнее" },
+  { id: 3, title: "Моя школа", category: "Образование", desc: "Электронный дневник, расписание уроков, домашние задания и контроль питания ребенка.", imageUrl: "https://images.unsplash.com/photo-1509062522246-3755977927d7?q=80&w=600", buttonText: "Подробнее" },
+  { id: 4, title: "Запись к врачу", category: "Здоровье", desc: "Онлайн-регистратура поликлиник: запись на прием, вызов врача на дом и доступ к медкарте.", imageUrl: "https://images.unsplash.com/photo-1532938911079-1b06ac7ceec7?q=80&w=600", buttonText: "Записаться" },
+  { id: 5, title: "Городской Wi-Fi", category: "ЖКХ", desc: "Карта точек бесплатного доступа к интернету в парках, скверах и общественном транспорте.", imageUrl: "https://images.unsplash.com/photo-1517426332561-c428f52f4675?q=80&w=600", buttonText: "Поиск" },
+  { id: 6, title: "Тюмень - наш дом", category: "ЖКХ", desc: "Сообщайте о городских проблемах: от ям на дорогах до неработающих фонарей.", imageUrl: "https://images.unsplash.com/photo-1449844908441-8829872d2607?q=80&w=600", buttonText: "Сообщить" },
+  { id: 7, title: "Запись в секции", category: "Спорт", desc: "Находите и записывайте детей в спортивные школы и кружки онлайн.", imageUrl: "https://images.unsplash.com/photo-1517649763942-7e3c76277c66?q=80&w=600", buttonText: "Найти секцию" },
+  { id: 8, title: "Умный паркинг", category: "Транспорт", desc: "Карта городских парковок с информацией о свободных местах в реальном времени.", imageUrl: "https://images.unsplash.com/photo-1543465077-50a23e4421b5?q=80&w=600", buttonText: "Найти место" },
+];
+
+export const STUDENT_STORIES: StudentStory[] = [
+  { id: 1, name: "Волков Дмитрий Валерьевич", role: "iOS Разработчик", text: "«Я пришел на городской хакатон с идеей, а ушел с инвестором. Мое приложение 'Тюмень Помнит' теперь помогает тысячам жителей находить свободные места в парке»", awards: ["Победитель хакатона 2024", "Грант 500 000 Р на развитие"], imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 2, name: "Соколов Антон Павлович", role: "Data Scientist / ML инженер", text: "«Мы с командой внедрили нейросеть для контроля работы коммунальных служб. Теперь камеры сами определяют проблемные зоны на дорогах, и автоматика отправляет заявки»", awards: ["Резидент Тюменского Технопарка", "Автор патента на ПО"], imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 3, name: "Смирнова Анна Сергеевна", role: "Архитектор-урбанист", text: "«Умный город — это не только код, но и комфортная среда. Я спроектировала 'цифровой сквер' с умными скамейками и эко-датчиками, который администрация уже взяла в работу»", awards: ["Стажировка в Департаменте архитектуры", "Лучший дипломный проект ТИУ"], imageUrl: "https://i.postimg.cc/52Dkd9q3/a22eed23-8a3f-4908-b72a-9bd411f54d1e.png" }
+];
+
+export const CAMPUS_TEAMS: CampusTeam[] = [
+  { id: 1, title: "EcoMonitors", desc: "Мониторинг воздуха. IoT система сбора и анализа данных о качестве воздуха в городе с визуализацией на интерактивной карте.", members: 3, tags: ["React Native", "Node.js", "InfluxDB"], stack: "Backend Dev, Data Analyst", date: "29 ноября 2025", status: "В разработке" },
+  { id: 2, title: "SmartParking", desc: "Городская мобильность. Система поиска свободных парковочных мест в центре города с помощью компьютерного зрения и уличных камер.", members: 5, tags: ["Python", "OpenCV", "Swift"], stack: "ML Engineer, iOS Dev", date: "13 ноября 2025", status: "В разработке" }
+];
+
+export const CAMPUS_EVENTS: CampusEvent[] = [
+  { id: 1, type: "Конференция", title: "Конференция 'Цифровой город'", date: "15 декабря 2025", time: "10:00 - 18:00", location: "ТИУ, Мельникайте 70", participants: "300+ участников", buttonText: "Зарегистрироваться", bgColor: "bg-[#1e3a4c]" },
+  { id: 2, type: "Саммит", title: "Саммит Smart Cities Russia", date: "20 января 2026", time: "09:00 - 17:00", location: "Экспоцентр", participants: "500+ участников", buttonText: "Зарегистрироваться", bgColor: "bg-[#1e3a4c]" },
+  { id: 3, type: "Хакатон", title: "Хакатон Smart Transport", date: "10-12 февраля 2026", location: "Технопарк", participants: "150+ участников", buttonText: "Зарегистрироваться", bgColor: "bg-[#1e3a4c]" }
+];
+
+export const STUDENT_RESOURCES: Resource[] = [
+  { id: 1, name: "Шаблон презентации проекта", format: "PPTX", size: "2.4 MB", icon: "📄" },
+  { id: 2, name: "Шаблон технической документации", format: "DOCX", size: "156 KB", icon: "📄" },
+  { id: 3, name: "Руководство по Git workflow", format: "PDF", size: "892 KB", icon: "📄" },
+  { id: 4, name: "UI/UX Kit Smart City", format: "Figma", size: "Online", icon: "🎨" }
+];
+
+export const FOOTER_LINKS = {
+  'О проекте': ['Команда', 'Новости', 'Партнеры'],
+  'Участникам': ['Как создать проект', 'FAQ', 'Поддержка'],
+  'SmartCity': ['Портал "Я решаю"', 'Правительство РФ', 'Правительство Тюменской области', 'Администрация города Тюмень', 'Портал услуг города Тюмень', 'Тюменская городская Дума'],
+  'Наши сервисы': ['Портал цифровых сервисов', 'Моя школа', 'Тюмень наш дом', 'Мой терапевт 72', 'Транспорт 72', 'Телемед 72']
+};
+
+export const NEWS_CATEGORIES = ["Все", "Технологии", "Город", "События", "Инновации"];
+
+export const NEWS_ARTICLES: NewsArticle[] = [
+  { id: 1, imageUrl: "https://images.unsplash.com/photo-1573164713988-8665fc963095?q=80&w=800", date: "29 ноября 2025", description: "В Тюмени запустили первый беспилотный маршрут в тестовом режиме", tag: "Технологии" },
+  { id: 2, imageUrl: "https://images.unsplash.com/photo-1519389950473-47ba0277781c?q=80&w=800", date: "28 ноября 2025", description: "Более 500 студентов приняли участие в городском ИТ-форуме", tag: "События" },
+  { id: 3, imageUrl: "https://images.unsplash.com/photo-1449824913935-59a10b8d2000?q=80&w=800", date: "27 ноября 2025", description: "Новая система умного освещения сэкономила городу 15% бюджета за месяц", tag: "Инновации" },
+  { id: 4, imageUrl: "https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?q=80&w=800", date: "26 ноября 2025", description: "Тюмень вошла в топ-3 цифровых городов России", tag: "Город" }
+];
+
+export const EVENT_CATEGORIES = ["Все", "Конференции и саммиты", "Хакатоны", "Воркшопы"];
+
+export const EVENTS: EventItem[] = [
+  { id: 1, title: "Smart City Tyumen 2025", description: "Ежегодная конференция по развитию городской среды", bgColor: "bg-blue-600", textColor: "text-white", colSpan: 2, rowSpan: 2, imageUrl: "https://images.unsplash.com/photo-1540575861501-7ad05823c93b?q=80&w=800" },
+  { id: 2, title: "AI & Big Data Summit", description: "Саммит экспертов по данным", bgColor: "bg-[#1e3a4c]", textColor: "text-white" },
+  { id: 3, title: "HackTheCity", description: "48-часовой хакатон для разработчиков", bgColor: "bg-yellow-500", textColor: "text-black" },
+  { id: 4, title: "Urban Lab", description: "Практический воркшоп по урбанистике", bgColor: "bg-[#1e3a4c]", textColor: "text-white" }
+];
+
+export const MANAGEMENT_STEPS: ManagementStep[] = [
+  { 
+    id: 1, 
+    icon: <div className="text-4xl mb-6">💡</div>,
+    title: "Инициативы граждан", 
+    description: "Предлагайте идеи по улучшению городской среды и голосуйте за проекты других жителей.",
+    stat1_val: "1.2K", stat1_desc: "Предложений", stat2_val: "45", stat2_desc: "Реализовано",
+    buttonText: "Предложить идею", buttonColor: "bg-yellow-500 text-black hover:bg-yellow-600"
+  },
+  { 
+    id: 2, 
+    icon: <div className="text-4xl mb-6">📊</div>,
+    title: "Мониторинг", 
+    description: "Отслеживайте состояние городских систем в реальном времени через открытые данные.",
+    stat1_val: "98%", stat1_desc: "Точность данных", stat2_val: "24/7", stat2_desc: "Режим работы",
+    buttonText: "Смотреть карту", buttonColor: "bg-sky-500 text-white hover:bg-sky-600"
+  },
+  { 
+    id: 3, 
+    icon: <div className="text-4xl mb-6">🛡️</div>,
+    title: "Безопасность", 
+    description: "Современные системы видеонаблюдения и аналитики для вашей безопасности.",
+    stat1_val: "5K+", stat1_desc: "Умных камер", stat2_val: "-30%", stat2_desc: "Уровень преступности",
+    buttonText: "Узнать больше", buttonColor: "bg-blue-700 text-white hover:bg-blue-800"
+  }
+];
+
+export const PROJECT_CATEGORIES = ["Все", "Транспорт", "Экология", "Безопасность", "ЖКХ", "Здравоохранение", "Образование", "Управление"];
+
+export const RESOURCES: Resource[] = [
+  { id: 1, name: "Открытые данные Тюмени", icon: "🌐" },
+  { id: 2, name: "Нормативные документы", icon: "📄" },
+  { id: 3, name: "ГИС Интеграция", icon: "🗺️" },
+  { id: 4, name: "API Сервисы", icon: "🔌" }
+];
+
+export const COUNCIL_TASKS = [
+  { icon: 'target', title: 'Определение стратегии', subtitle: 'Разработка приоритетных направлений развития' },
+  { icon: 'folder', title: 'Управление портфелем', subtitle: 'Координация ключевых городских проектов' },
+  { icon: 'ruble', title: 'Бюджетирование', subtitle: 'Распределение средств на инновации' },
+  { icon: 'sync', title: 'Взаимодействие', subtitle: 'Связь между бизнесом, властью и наукой' },
+  { icon: 'search', title: 'Экспертиза', subtitle: 'Оценка эффективности внедряемых решений' },
+  { icon: 'scales', title: 'Нормотворчество', subtitle: 'Подготовка правовой базы для цифры' }
+];
+
+export const COUNCIL_MEMBERS: Member[] = [
+  { id: 1, name: "Афанасьев Максим Викторович", role: "Глава города Тюмень, Председатель совета", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 2, name: "Кухарук Руслан Николаевич", role: "Заместитель председателя совета", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 3, name: "Иванов Иван Иванович", role: "Директор департамента ИТ", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 4, name: "Петров Петр Петрович", role: "Ректор ТИУ", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" }
+];
+
+export const COMMITTEE_MEMBERS: Member[] = [
+  { id: 1, name: "Сидоров Сидор", role: "Технический директор", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" },
+  { id: 2, name: "Козлова Анна", role: "Ведущий аналитик", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" }
+];
+
+export const MONITORING_MEMBERS: Member[] = [
+  { id: 1, name: "Смирнов Олег", role: "Руководитель группы", imageUrl: "https://i.postimg.cc/VNS0xmLz/105ba0ae5ed326f2f20975ea2095c809-297224.jpg" }
+];
+
+export const USER_PROFILE = {
+  name: "Александр Иванов",
+  level: 5,
+  points: 1250,
+  joinedTeams: [1, 2]
+};
+================================================================================
+
+Файл: index.tsx
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+================================================================================
+
+Файл: it_parser.py
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import requests
+import xml.etree.ElementTree as ET
+import json
+import logging
+import sys
+import os
+import time
+from bs4 import BeautifulSoup
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+def download_it_image(session, url, news_id):
+    if not url: return ""
+    try:
+        target_dir = os.path.join('public', 'news_images')
+        if not os.path.exists(target_dir): os.makedirs(target_dir)
+        ext = url.split('.')[-1].split('?')[0]
+        if len(ext) > 4: ext = 'jpg'
+        filename = f"it_{news_id}.{ext}"
+        filepath = os.path.join(target_dir, filename)
+        
+        res = session.get(url, timeout=15)
+        with open(filepath, 'wb') as f:
+            f.write(res.content)
+        return f"/news_images/{filename}"
+    except: return ""
+
+def get_full_text_from_url(session, url):
+    """Попытка достать полный текст со страницы статьи"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
+    try:
+        time.sleep(1)
+        res = session.get(url, headers=headers, timeout=10)
+        if res.status_code != 200: return None
+        
+        soup = BeautifulSoup(res.text, 'html.parser')
+        # Ищем по всем возможным тегам контента Хабра
+        article = soup.find('div', {'class': ['article-formatted-body', 'tm-article-body', 'post-content-body']})
+        if not article:
+            article = soup.find('div', id='post-content-body')
+            
+        return article.get_text(separator='\n', strip=True) if article else None
+    except:
+        return None
+
+def parse_habr():
+    rss_url = "https://habr.com/ru/rss/articles/"
+    session = requests.Session()
+    session.trust_env = False 
+
+    logging.info("--- ЗАПУСК ОБНОВЛЕННОГО IT-ПАРСЕРА ---")
+    try:
+        res = session.get(rss_url, timeout=20)
+        root = ET.fromstring(res.content)
+        items = root.findall('.//item')
+        
+        results = []
+        for i, item in enumerate(items[:36], 1):
+            title = item.find('title').text.strip()
+            link = item.find('link').text.strip()
+            pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
+            
+            # --- РАБОТАЕМ С ОПИСАНИЕМ ИЗ RSS ---
+            description_html = item.find('description').text
+            rss_soup = BeautifulSoup(description_html, 'html.parser')
+            
+            # 1. Ищем картинку прямо в описании
+            img_tag = rss_soup.find('img')
+            rss_img_url = img_tag['src'] if img_tag else ""
+            
+            # 2. Ищем текст превью в описании
+            rss_text = rss_soup.get_text(strip=True).replace('Читать далее', '')
+
+            logging.info(f"Парсим IT [{i}]: {title[:50]}...")
+            
+            # 3. Пытаемся зайти на сайт за полным текстом
+            full_text = get_full_text_from_url(session, link)
+            
+            # Если полный текст не нашли, берем текст из RSS
+            final_text = full_text if full_text else rss_text
+            
+            # 4. Скачиваем картинку
+            local_img = download_it_image(session, rss_img_url, i)
+
+            results.append({
+                "id": i + 100,
+                "title": title,
+                "link": link,
+                "date": pub_date,
+                "description": rss_text[:200] + "...",
+                "full_text": final_text,
+                "imageUrl": local_img,
+                "tag": "Технологии"
+            })
+            
+        return results
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}")
+        return []
+
+if __name__ == "__main__":
+    it_data = parse_habr()
+    if it_data:
+        with open('public/it_news_data.json', 'w', encoding='utf-8') as j:
+            json.dump(it_data, j, ensure_ascii=False, indent=4)
+        logging.info("Успех! Данные извлечены (включая fallback из RSS).")
+================================================================================
+
+Файл: p.py
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import os
+
+# Что ищем и на что меняем
+OLD_LINK = 'https://i.postimg.cc/Vk3Smcdc/icons8-zcina-60.png'
+NEW_LINK = 'https://i.postimg.cc/Vk3Smcdc/icons8-zcina-60.png'
+
+# Расширения файлов, в которых будем делать замену
+EXTENSIONS = ('.tsx', '.ts', '.js', '.json', '.html', '.css', '.py')
+
+def replace_in_files():
+    count = 0
+    # Проходим по всем папкам и подпапкам
+    for root, dirs, files in os.walk("."):
+        # Пропускаем папку node_modules и .git, чтобы не тратить время
+        if 'node_modules' in root or '.git' in root:
+            continue
+            
+        for file in files:
+            if file.endswith(EXTENSIONS):
+                file_path = os.path.join(root, file)
+                
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    if OLD_LINK in content:
+                        new_content = content.replace(OLD_LINK, NEW_LINK)
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(new_content)
+                        print(f"✅ Изменено: {file_path}")
+                        count += 1
+                except Exception as e:
+                    print(f"❌ Ошибка в файле {file_path}: {e}")
+
+    print(f"\nГотово! Ссылка заменена в {count} файлах.")
+
+if __name__ == "__main__":
+    replace_in_files()
+================================================================================
+
+Файл: tl_parser.py
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import requests
+import xml.etree.ElementTree as ET
+import json
+import logging
+import sys
+import time
+import os
+from bs4 import BeautifulSoup
+
+# Настройка логов
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+def download_image(session, url, news_id):
+    """Скачивает картинку и возвращает путь к локальному файлу"""
+    if not url:
+        return ""
+    
+    try:
+        # Папка, куда сохраняем (для React это обычно public/news_images)
+        target_dir = os.path.join('public', 'news_images')
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+
+        # Формируем имя файла
+        extension = url.split('.')[-1].split('?')[0] # берем расширение (jpg, png)
+        if len(extension) > 4: extension = 'jpg'
+        filename = f"news_{news_id}.{extension}"
+        filepath = os.path.join(target_dir, filename)
+
+        # Скачиваем
+        img_data = session.get(url, timeout=15, proxies={"http": None, "https": None}).content
+        with open(filepath, 'wb') as handler:
+            handler.write(img_data)
+            
+        # Возвращаем путь, который будет понятен React-у (относительно папки public)
+        return f"/news_images/{filename}"
+    except Exception as e:
+        logging.error(f"Не удалось скачать картинку {url}: {e}")
+        return ""
+
+def get_article_details(session, url, news_id):
+    """Извлекает текст и скачивает картинку"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    try:
+        time.sleep(1)
+        response = session.get(url, headers=headers, timeout=15, proxies={"http": None, "https": None})
+        if response.status_code != 200:
+            return "Ошибка доступа к странице", ""
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # --- ПОИСК ТЕКСТА ---
+        # Пробуем разные варианты контейнеров, которые бывают на t-l.ru
+        content = None
+        for selector in ['div.text', 'div.article-text', 'div.news-text', 'article']:
+            content = soup.select_one(selector)
+            if content: break
+        
+        if content:
+            # Чистим текст от скриптов и рекламы внутри
+            for s in content(['script', 'style', 'aside']): s.decompose()
+            full_text = content.get_text(separator='\n', strip=True)
+        else:
+            # Запасной вариант: берем все P из основного блока
+            paragraphs = soup.find_all('p')
+            full_text = "\n".join([p.get_text() for p in paragraphs if len(p.get_text()) > 50])
+
+        if not full_text.strip():
+            full_text = "Текст статьи временно недоступен."
+
+        # --- ПОИСК И СКАЧИВАНИЕ КАРТИНКИ ---
+        image_url = ""
+        og_image = soup.find("meta", property="og:image")
+        if og_image:
+            image_url = og_image["content"]
+        
+        if not image_url:
+            img_tag = content.find('img') if content else None
+            if img_tag: image_url = img_tag.get('src', '')
+
+        if image_url and not image_url.startswith('http'):
+            image_url = "https://t-l.ru" + image_url
+
+        # Скачиваем картинку себе
+        local_image_path = download_image(session, image_url, news_id)
+
+        return full_text, local_image_path
+
+    except Exception as e:
+        logging.error(f"Ошибка парсинга {url}: {e}")
+        return "Ошибка загрузки", ""
+
+def parse_tl_full():
+    rss_url = "https://t-l.ru/rss.xml"
+    session = requests.Session()
+    session.trust_env = False
+
+    try:
+        res = session.get(rss_url, timeout=20, proxies={"http": None, "https": None})
+        root = ET.fromstring(res.content)
+        items = root.findall('.//item')
+        
+        results = []
+        for i, item in enumerate(items[:36], 1): # Берем 6 новостей
+            title = item.find('title').text.strip()
+            link = item.find('link').text.strip()
+            date = item.find('pubDate').text.strip()
+
+            logging.info(f"Парсим [{i}]: {title[:50]}...")
+            text, local_img = get_article_details(session, link, i)
+
+            results.append({
+                "id": i,
+                "title": title,
+                "link": link,
+                "date": date,
+                "description": text[:200] + "...",
+                "full_text": text,
+                "imageUrl": local_img, # Теперь здесь путь типа /news_images/news_1.jpg
+                "tag": "Город"
+            })
+            
+        return results
+    except Exception as e:
+        logging.error(f"Ошибка RSS: {e}")
+        return []
+
+if __name__ == "__main__":
+    data = parse_tl_full()
+    if data:
+        # Сохраняем JSON в папку src/data (или где он у тебя лежит)
+        with open('public/news_data.json', 'w', encoding='utf-8') as j:
+            json.dump(data, j, ensure_ascii=False, indent=4)
+        logging.info("Готово! Картинки в public/news_images, данные в news_data.json")
+================================================================================
+
+Файл: types.ts
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+
+import React from 'react';
+
+export interface NewsArticle {
+  id: number;
+  imageUrl: string;
+  date: string;
+  title?: string;        // Добавлено (название новости)
+  description: string;   // Краткое описание
+  full_text?: string;    // Добавлено (полный текст)
+  tag?: string;
+  link?: string;         // Добавлено (ссылка на источник)
+}
+
+export interface ProjectData {
+  id: number;
+  title: string;
+  status: string;
+  statusColor: string;
+  category: string;
+  rating: number;
+  votes: number;
+  desc: string;
+  tags: string[];
+  team: string;
+  participants: number;
+  imageUrl: string;
+  projectType: 'city' | 'commercial'; 
+}
+
+export interface StudentStory {
+  id: number;
+  name: string;
+  role: string;
+  text: string;
+  awards: string[];
+  imageUrl: string;
+}
+
+export interface CampusTeam {
+  id: number;
+  title: string;
+  desc: string;
+  members: number;
+  tags: string[];
+  stack: string;
+  date: string;
+  status: string;
+}
+
+export interface CampusEvent {
+  id: number;
+  type: string;
+  title: string;
+  date: string;
+  time?: string;
+  location: string;
+  participants: string;
+  buttonText: string;
+  bgColor: string;
+}
+
+export interface Member {
+  id: number;
+  name: string;
+  role: string;
+  imageUrl?: string;
+}
+
+export interface Resource {
+  id: number;
+  name: string;
+  icon: string | React.ReactNode;
+  format?: string;
+  size?: string;
+  imageUrl?: string;
+}
+
+export interface EventItem {
+  id: number;
+  title: string;
+  description?: string;
+  imageUrl?: string;
+  bgColor: string;
+  textColor: string;
+  colSpan?: number;
+  rowSpan?: number;
+}
+export interface ProjectData {
+  id: number;
+  title: string;
+  status: string;
+  statusColor: string;
+  category: string;
+  rating: number;
+  votes: number;
+  desc: string;
+  tags: string[];
+  team: string;
+  participants: number;
+  imageUrl: string;
+  projectType: 'city' | 'commercial'; // НОВОЕ ПОЛЕ
+}
+
+// НОВЫЙ ИНТЕРФЕЙС
+export interface ServiceItem {
+  id: number;
+  title: string;
+  category: string;
+  desc: string;
+  imageUrl: string;
+  buttonText: string;
+}
+export interface ManagementStep {
+  id: number;
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  stat1_val: string;
+  stat1_desc: string;
+  stat2_val: string;
+  stat2_desc: string;
+  buttonText: string;
+  buttonColor: string;
+}
+
+================================================================================
+
+Файл: vite.config.ts
+Путь: C:\tyumen-smart-city (14)
+--------------------------------------------------
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  // Указываем базовый путь для корректной работы на GitHub Pages.
+  base: '/tyumen-smart-city/'
+})
+================================================================================
+

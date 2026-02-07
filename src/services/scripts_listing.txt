@@ -1,0 +1,43 @@
+Директория: C:\tyumen-smart-city (14)\src\services
+================================================================================
+
+Файл: api.ts
+Путь: C:\tyumen-smart-city (14)\src\services
+--------------------------------------------------
+import { supabase } from './supabase';
+
+export const ApiService = {
+  
+  async getProjects() {
+    const { data, error } = await supabase.from('projects').select('*');
+    if (error) throw error;
+    return data;
+  },
+
+  
+  async getServices() {
+    const { data, error } = await supabase.from('services').select('*');
+    if (error) throw error;
+    return data;
+  },
+
+  
+  async createProject(projectData: any) {
+    const { data, error } = await supabase.from('projects').insert([projectData]);
+    if (error) throw error;
+    return data;
+  }
+};
+================================================================================
+
+Файл: supabase.ts
+Путь: C:\tyumen-smart-city (14)\src\services
+--------------------------------------------------
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+export const supabase = createClient(supabaseUrl, supabaseKey);
+================================================================================
+
