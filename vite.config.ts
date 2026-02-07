@@ -5,5 +5,5 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   // Указываем базовый путь для корректной работы на GitHub Pages.
-  base: '/tyumen-smart-city/'
+  base: '/smartcity/'
 })
